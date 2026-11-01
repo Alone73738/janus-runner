@@ -21,22 +21,34 @@ try { job = await open(process.env.JOB || ''); } catch { say('fail: bad job'); p
 const wait = job.at - Date.now(); if (wait > 0) await new Promise(r => setTimeout(r, Math.min(wait, 10 * 60000)));
 const started = Date.now();
 const images = new Map();
-let res;
+let res, outCookies = null;
 try {
   const ai = { run: async (model, input) => { // Workers AI fallback through the JANUS worker (encrypted)
     const r = await fetch(job.cb.replace(/\/result$/, '/ai'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: await seal({ run: job.run, model, input }) }) });
     const j = await r.json(); if (!j.blob) throw new Error('ai ' + r.status); const o = await open(j.blob); if (!o.ok) throw new Error(o.err); return o.out; } };
   const llm = makeLLM({ geminiKey: job.gemini || null, ai });
+  const sites = Object.keys(job.logins || {});
+  const keep = (c) => sites.some(s => String(c.domain || '').replace(/^\./, '').endsWith(s));
+  let cookies = [];
+  try { const r = await fetch(job.cb.replace(/\/result$/, '/state'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: await seal({ run: job.run }) }) }); const j = await r.json(); if (j.blob) cookies = ((await open(j.blob)).cookies || []).filter(keep); } catch { }
   const ctx = {
     now: () => Date.now(), llm, lastModel: llm.lastModel,
     browser: () => puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }),
-    logins: { get: async (site) => (job.logins || {})[site] || null },
+    logins: { get: async (site) => (job.logins || {})[site] || null, list: async () => sites },
+    cookies, saveCookies: async (all) => { outCookies = (all || []).filter(keep).map(({ name, value, domain, path, expires, httpOnly, secure, sameSite }) => ({ name, value, domain, path, expires, httpOnly, secure, sameSite })); },
+    genImage: job.gemini ? async (prompt) => {
+      for (const m of ['gemini-3.1-flash-image', 'gemini-2.5-flash-image']) {
+        try { const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': job.gemini }, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'] } }) });
+          if (!r.ok) continue; const j = await r.json(); const im = (j.candidates?.[0]?.content?.parts || []).find(p => p.inlineData); if (im) return { bytes: unb64(im.inlineData.data), mime: im.inlineData.mimeType || 'image/png' }; } catch { }
+      }
+      return null; } : undefined,
+    genImage2: async (prompt) => { const o = await ai.run('@cf/black-forest-labs/flux-1-schnell', { prompt: prompt.slice(0, 2000), steps: 8 }); return o && o.image ? { bytes: unb64(o.image), mime: 'image/jpeg' } : null; },
     images: { put: async (bytes, mime) => { const id = 'img_' + [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join(''); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
   };
-  res = await runAgent(ctx, job.prompt, { maxSteps: job.maxSteps || 40 });
+  res = await runAgent(ctx, job.prompt, { maxSteps: job.maxSteps || 60 });
 } catch (e) { res = { success: false, result: 'Error: ' + (e && e.message || e), steps: [], images: [] }; }
 const imgs = (res.images || []).map(id => images.get(id) && { id, mime: images.get(id).mime, b64: b64(images.get(id).bytes) }).filter(Boolean);
-const body = await seal({ run: job.run, ...res, images: imgs, started, finished: Date.now() });
+const body = await seal({ run: job.run, ...res, images: imgs, cookies: outCookies, started, finished: Date.now() });
 for (let i = 0; i < 4; i++) {
   try { const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: body }) }); if (r.ok) { say(res.success ? 'ok' : 'fail'); process.exit(0); } } catch { }
   await new Promise(r => setTimeout(r, 3000 * (i + 1)));
