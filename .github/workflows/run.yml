@@ -1,0 +1,21 @@
+name: janus
+run-name: janus
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: encrypted job
+        required: true
+permissions: {}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - run: npm i --no-audit --no-fund --loglevel=error --silent
+      - run: node run.mjs
+        env:
+          JOB: ${{ inputs.job }}
+          RUNNER_KEY: ${{ secrets.RUNNER_KEY }}
