@@ -249,7 +249,8 @@ export async function runAgent(ctx, task, opts = {}) {
 // Checker: never let the agent claim a success its own steps don't show.
 export async function verify(ctx, task, steps, claim) {
   const t = task.toLowerCase(); const names = steps.map(s => s.tool);
-  const wantsPost = /upload|post|publish|pin\b|pins\b|share on|daalo|dalo|kar do.*(pinterest|instagram|youtube)/.test(t) && /pinterest|instagram|youtube|facebook|twitter|\bx\b|reddit|linkedin|tumblr|site|account/.test(t);
+  const negated = /(do ?n.?t|do not|never|without|mat|nahi|na)\s+(publish|post|upload|daal|dal)/.test(t);
+  const wantsPost = !negated && /upload|post|publish|pin\b|pins\b|share on|daalo|dalo|kar do.*(pinterest|instagram|youtube)/.test(t) && /pinterest|instagram|youtube|facebook|twitter|\bx\b|reddit|linkedin|tumblr|site|account/.test(t);
   if (wantsPost) {
     const up = steps.findIndex(s => s.tool === 'upload_image' && /^image put/.test(s.out));
     if (/image|wallpaper|photo|pic/.test(t) && up < 0) return { ok: false, reason: 'no image was uploaded to the site (upload_image never succeeded)' };
