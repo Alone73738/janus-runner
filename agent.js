@@ -30,7 +30,7 @@ export const TOOLS = [
 
 const MARK_JS = `(() => {
   document.querySelectorAll('[data-jn]').forEach(e => e.removeAttribute('data-jn'));
-  const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=tab],[role=checkbox],[role=menuitem],[role=option],[contenteditable=true],label[for]';
+  const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=tab],[role=checkbox],[role=menuitem],[role=option],[role=textbox],[role=combobox],[role=switch],[contenteditable=true],[contenteditable=""],label[for]';
   const out = []; let i = 0;
   for (const e of document.querySelectorAll(sel)) {
     const r = e.getBoundingClientRect(); const st = getComputedStyle(e);
@@ -38,7 +38,7 @@ const MARK_JS = `(() => {
     if (!fileIn && (r.width < 2 || r.height < 2 || st.visibility === 'hidden' || st.display === 'none')) continue;
     if (!fileIn && (r.bottom < 0 || r.top > innerHeight * 2.5)) continue;
     e.setAttribute('data-jn', ++i);
-    const t = (e.getAttribute('aria-label') || e.innerText || e.value || e.placeholder || e.title || e.name || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
+    const t = (e.getAttribute('aria-label') || e.innerText || e.value || e.placeholder || e.getAttribute('aria-placeholder') || e.getAttribute('data-placeholder') || e.title || e.name || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
     const tag = e.tagName.toLowerCase() + (e.type ? ':' + e.type : '');
     out.push(i + ' ' + tag + ' "' + t + '"');
     if (i >= 120) break;
@@ -72,7 +72,7 @@ export async function readUrl(u) {
   return clip(h.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim(), 6000);
 }
 
-const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_image (it is free and returns an image_id). If the task says to make the image on Bing Image Creator, Leonardo, Canva or another generator website, do NOT open that site (it needs a Microsoft/other account and downloads don't work here): silently use generate_image instead, which gives the same kind of image, and continue with the rest of the task. Never fail a task just because of the image site. Pinterest: first open https://www.pinterest.com/login/ and call sign_in (skip if already logged in: the page then redirects away from /login), then open https://www.pinterest.com/pin-creation-tool/ (if it redirects to the home page you are NOT logged in) → upload_image on the file input (element "input:file") → type title, description, link → click "Publish". Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
+const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_image (it is free and returns an image_id). If the task says to make the image on Bing Image Creator, Leonardo, Canva or another generator website, do NOT open that site (it needs a Microsoft/other account and downloads don't work here): silently use generate_image instead, which gives the same kind of image, and continue with the rest of the task. Never fail a task just because of the image site. Pinterest: first open https://www.pinterest.com/login/ and call sign_in (skip if already logged in: the page then redirects away from /login), then open https://www.pinterest.com/pin-creation-tool/ (if it redirects to the home page you are NOT logged in). On that page: upload_image into the "input:file" element (Upload your media; JPG/PNG up to 20MB, MP4 up to 200MB) → wait/list_elements until the image preview shows → type the title into "Tell everyone what your Pin is about" / "Add a title" → type the description into "Describe your Pin" / "Add a detailed description" (it is a text box, click it then type) → optional: link, "Choose a board" → click the red "Publish" button (it appears at the top only after the image is uploaded) → confirm with read_page that Pinterest says it was published / shows the new pin. If a "Save draft"/"Publish" choice appears, choose Publish. Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
 function sysPrompt(task, nowIso, loginSites) {
   return `You are JANUS Cloud, the background worker of the JANUS app. You run a scheduled task by yourself while the user's phone may be off, so nobody can answer questions: decide sensibly and finish.
 Now: ${nowIso} (user timezone Asia/Kolkata).
