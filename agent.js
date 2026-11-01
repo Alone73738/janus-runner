@@ -23,7 +23,8 @@ export const TOOLS = [
   { name: 'read_page', description: 'Read visible text of the current page.', parameters: { type: 'object', properties: {} } },
   { name: 'look_at_screen', description: 'Take a screenshot of the current page and look at it.', parameters: { type: 'object', properties: {} } },
   { name: 'sign_in', description: 'Sign in on the current page with the saved login for this site: fills email/username + password and presses the sign-in button. You never see the password. Call when a login form is visible (call again on a second password page).', parameters: { type: 'object', properties: {} } },
-  { name: 'upload_image', description: 'Put a generated image (image_id) into a file-upload element.', parameters: { type: 'object', properties: { element_id: { type: 'integer' }, image_id: { type: 'string' } }, required: ['element_id', 'image_id'] } },
+  { name: 'upload_image', description: 'Put a generated image or a file from run_code (its id) into a file-upload element.', parameters: { type: 'object', properties: { element_id: { type: 'integer' }, image_id: { type: 'string' } }, required: ['element_id', 'image_id'] } },
+  { name: 'run_code', description: 'Run code on the cloud computer (Linux, Python 3, Node 20, ffmpeg if installed; internet on; pip install --user / npm i allowed; no sudo). Use for big scripts, data work, image/video editing (Pillow, ffmpeg, moviepy), making files. Files you save in the current folder come back as file ids (images/videos can then go to upload_image). Input files: generated images are in ./inputs/<image_id>.<ext>.', parameters: { type: 'object', properties: { language: { type: 'string', enum: ['python', 'node', 'bash'] }, code: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['language', 'code'] } },
   { name: 'finish', description: 'Task done (or impossible). Give the final short result for the user.', parameters: { type: 'object', properties: { result: { type: 'string' }, success: { type: 'boolean' } }, required: ['result', 'success'] } },
 ];
 
@@ -71,7 +72,7 @@ export async function readUrl(u) {
   return clip(h.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim(), 6000);
 }
 
-const SITE_TIPS = `Site tips: Pinterest new pin = open https://www.pinterest.com/pin-creation-tool/ (log in first if asked: click "Log in", then sign_in) → upload_image on the file input (element "input:file") → type title, description, link → click "Publish". Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
+const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_image (it is free and returns an image_id). If the task says to make the image on Bing Image Creator, Leonardo, Canva or another generator website, do NOT open that site (it needs a Microsoft/other account and downloads don't work here): silently use generate_image instead, which gives the same kind of image, and continue with the rest of the task. Never fail a task just because of the image site. Pinterest: first open https://www.pinterest.com/login/ and call sign_in (skip if already logged in: the page then redirects away from /login), then open https://www.pinterest.com/pin-creation-tool/ (if it redirects to the home page you are NOT logged in) → upload_image on the file input (element "input:file") → type title, description, link → click "Publish". Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
 function sysPrompt(task, nowIso, loginSites) {
   return `You are JANUS Cloud, the background worker of the JANUS app. You run a scheduled task by yourself while the user's phone may be off, so nobody can answer questions: decide sensibly and finish.
 Now: ${nowIso} (user timezone Asia/Kolkata).
@@ -156,31 +157,57 @@ export async function runAgent(ctx, task, opts = {}) {
         return '';
       });
       if (!how) await p.keyboard.press('Enter');
-      await settle(p); try { await p.waitForNavigation({ timeout: 3000 }); } catch { }
-      return 'Filled ' + r + ' for ' + site + ' and ' + (how || 'pressed Enter') + '. Now on: ' + p.url() + ' — check with read_page/list_elements (if a password page appears next, call sign_in again).';
+      const before = p.url();
+      try { await p.waitForNavigation({ timeout: 8000 }); } catch { }
+      await settle(p); await new Promise(z => setTimeout(z, 1500));
+      let st = null; for (let k = 0; k < 4 && !st; k++) { try { st = await p.evaluate(() => {
+        const vis = e => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const pw = [...document.querySelectorAll('input[type=password]')].some(vis);
+        const txt = document.body.innerText || '';
+        const lines = txt.split('\n').map(x => x.trim()).filter(x => x && x.length < 220);
+        const bad = /(incorrect|wrong|doesn.t belong|not belong|no account|couldn.t find|isn.t right|not right|invalid|doesn.t match|try again|too many|captcha|robot|suspicious|unusual|blocked|locked|confirm it.s you|verify it.s you)/i;
+        const err = lines.find(x => bad.test(x)) || '';
+        const errEl = [...document.querySelectorAll('[role=alert],[aria-live=assertive],[aria-live=polite],[class*=error i],[id*=error i]')].filter(vis).map(e => String(e.innerText || e.textContent || '').trim()).filter(x => x && x.length < 220)[0] || '';
+        const otp = [...document.querySelectorAll('input[autocomplete=one-time-code],input[name*=code i],input[id*=code i],input[inputmode=numeric]')].some(vis);
+        return { pw, otp, err: (errEl || err).slice(0, 200), url: location.href };
+      }); } catch { await new Promise(z => setTimeout(z, 2000)); } }
+      if (!st) return 'Login submitted but the page kept reloading. Call list_elements to check if you are logged in.';
+      const onLogin = /log.?in|sign.?in|signin|auth/i.test(new URL(st.url).pathname);
+      if (st.otp && !st.pw) return 'LOGIN NEEDS A CODE on ' + site + ': the site asks for a verification code (sent to the user\'s email/phone). You cannot get it. finish(success=false, "' + site + ' ne verification code maanga. Phone pe ek baar ' + site + ' mein login karke approve karo, phir JANUS → Scheduled → Run dabao").';
+      if (st.err && (st.pw || onLogin)) return 'LOGIN FAILED on ' + site + ': page says "' + st.err + '". Do not retry more than once. If it is about password/email → finish(success=false, "' + site + ' ka saved password galat hai, JANUS → Scheduled → Logins mein sahi login dobara Share karo"). If it is a code/captcha/verification → finish(success=false) asking the user to log in once on their phone and approve.';
+      if (st.pw && /password/.test(r) ) return 'LOGIN NOT CONFIRMED: still on a page with a password box (' + st.url + '). Call look_at_screen to see why (error, captcha, extra step).';
+      if (st.pw && !/password/.test(r)) return 'Filled ' + r + ' and pressed ' + (how || 'Enter') + '. Now a password page is shown: call sign_in again.';
+      return 'LOGIN OK: ' + site + ' accepted the sign-in. Now on: ' + st.url + (st.url === before ? ' (same URL; verify with list_elements that you are logged in)' : '');
+    },
+    run_code: async ({ language, code, timeout_sec }) => {
+      if (!ctx.runCode) return 'run_code is not available on this runner (only on the GitHub runner).';
+      const r = await ctx.runCode(language, String(code || ''), Math.min(Math.max(+timeout_sec || 120, 10), 600), images);
+      for (const f of r.files || []) if (f.mime.startsWith('image/')) images.push(f.id);
+      return 'exit ' + r.code + '\n' + clip(r.out || '', 5000) + (r.files && r.files.length ? '\nFILES: ' + r.files.map(f => f.name + ' → ' + f.id + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
     },
     upload_image: async ({ element_id, image_id }) => {
       const img = await ctx.images.get(image_id); if (!img) throw new Error('unknown image_id');
       const h = await el(element_id); const b64 = btoaBytes(img.bytes);
       const ok = await h.evaluate((e, b, mime) => {
         const bin = atob(b); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-        const f = new File([u], 'janus.' + (mime.includes('png') ? 'png' : 'jpg'), { type: mime });
+        const ext = mime.includes('png') ? 'png' : mime.includes('mp4') ? 'mp4' : mime.includes('webm') ? 'webm' : mime.includes('gif') ? 'gif' : mime.includes('webp') ? 'webp' : 'jpg'; const f = new File([u], 'janus.' + ext, { type: mime });
         const dt = new DataTransfer(); dt.items.add(f);
         let inp = e.tagName === 'INPUT' && e.type === 'file' ? e : (e.querySelector('input[type=file]') || document.querySelector('input[type=file]'));
         if (inp) { inp.files = dt.files; inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new Event('change', { bubbles: true })); return 'input'; }
         e.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt })); return 'drop';
       }, b64, img.mime);
-      const p = await getPage(); await settle(p); return 'uploaded via ' + ok;
+      const p = await getPage(); await settle(p); await new Promise(z => setTimeout(z, 2500));
+      return 'image put into the page via ' + ok + '. Check the page shows the image now (if not, try another file input or look_at_screen):\n' + (await p.evaluate(MARK_JS));
     },
   };
 
   const loginSites = ctx.logins.list ? await ctx.logins.list() : [];
   const contents = [{ role: 'user', parts: [{ text: sysPrompt(task, new Date(ctx.now()).toISOString(), loginSites) }] }];
-  let result = null, nudges = 0;
+  let result = null, nudges = 0, checks = 0;
   try {
     for (let i = 0; i < maxSteps && !result; i++) {
       ctx.log && ctx.log('llm', {step: i});
-      const resp = await ctx.llm(contents, TOOLS);
+      const resp = await ctx.llm(contents, ctx.runCode ? TOOLS : TOOLS.filter(t => t.name !== 'run_code'));
       const parts = resp.parts || [];
       contents.push({ role: 'model', parts });
       const calls = parts.filter(p => p.functionCall);
@@ -192,12 +219,19 @@ export async function runAgent(ctx, task, opts = {}) {
       const outs = [];
       for (const c of calls) {
         const { name, args = {} } = c.functionCall;
-        if (name === 'finish') { result = { success: args.success !== false, result: String(args.result || '') }; break; }
+        if (name === 'finish') {
+          const claim = { success: args.success !== false, result: String(args.result || '') };
+          if (claim.success && checks < 2) {
+            const v = await verify(ctx, task, steps, claim.result);
+            if (!v.ok) { checks++; outs.push({ functionResponse: { name, response: { result: 'NOT ACCEPTED by checker: ' + v.reason + '. The task is not done yet. Do the missing step now, or finish(success=false) with the exact reason.' } } }); steps.push({ tool: 'checker', args: {}, out: clip('rejected: ' + v.reason, 200) }); continue; }
+          } else if (claim.success && checks >= 2) { const v = await verify(ctx, task, steps, claim.result); if (!v.ok) { claim.success = false; claim.result = 'Task poora nahi hua: ' + v.reason; } }
+          result = claim; break;
+        }
         let out, img = null;
         ctx.log && ctx.log('call:' + name, args);
         try { const f = impl[name]; if (!f) throw new Error('unknown tool'); out = await f(args); if (out && typeof out === 'object') { img = out.image; out = out.text; } }
         catch (e) { out = 'ERROR: ' + (e && e.message || e); }
-        steps.push({ tool: name, args: redact(args), out: clip(String(out), 200) });
+        steps.push({ tool: name, args: redact(args), out: clip(String(out), 400) });
         ctx.log && ctx.log(name, args, out);
         outs.push({ functionResponse: { name, response: { result: clip(String(out), 7000) } } });
         if (img) outs.push({ inlineData: { mimeType: 'image/jpeg', data: img } });
@@ -210,6 +244,26 @@ export async function runAgent(ctx, task, opts = {}) {
   }
   if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
   return { ...result, steps, images, model: ctx.lastModel && ctx.lastModel() };
+}
+
+// Checker: never let the agent claim a success its own steps don't show.
+export async function verify(ctx, task, steps, claim) {
+  const t = task.toLowerCase(); const names = steps.map(s => s.tool);
+  const wantsPost = /upload|post|publish|pin\b|pins\b|share on|daalo|dalo|kar do.*(pinterest|instagram|youtube)/.test(t) && /pinterest|instagram|youtube|facebook|twitter|\bx\b|reddit|linkedin|tumblr|site|account/.test(t);
+  if (wantsPost) {
+    const up = steps.findIndex(s => s.tool === 'upload_image' && /^image put/.test(s.out));
+    if (/image|wallpaper|photo|pic/.test(t) && up < 0) return { ok: false, reason: 'no image was uploaded to the site (upload_image never succeeded)' };
+    if (up >= 0 && !steps.slice(up + 1).some(s => s.tool === 'click_element')) return { ok: false, reason: 'the image was put in but Publish/Post was never clicked' };
+  }
+  if (steps.some(s => /^LOGIN FAILED/.test(s.out)) && !steps.some(s => /^LOGIN OK/.test(s.out))) return { ok: false, reason: 'login failed' };
+  try {
+    const log = steps.map((s, i) => (i + 1) + '. ' + s.tool + ' ' + JSON.stringify(s.args).slice(0, 120) + ' => ' + s.out.replace(/\s+/g, ' ').slice(0, 160)).join('\n');
+    const r = await ctx.llm([{ role: 'user', parts: [{ text: 'You are a strict checker. TASK:\n' + task + '\n\nSTEPS the agent actually did:\n' + log + '\n\nAGENT CLAIMS: ' + claim + '\n\nDo the steps PROVE every part of the task was really done (e.g. a post really published, not just a page opened)? Reply ONLY JSON: {"done": true|false, "reason": "short missing part"}' }] }], []);
+    const txt = (r.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
+    const j = JSON.parse((txt.match(/\{[\s\S]*\}/) || ['{}'])[0]);
+    if (j.done === false) return { ok: false, reason: String(j.reason || 'steps do not show the task was completed').slice(0, 200) };
+  } catch { }
+  return { ok: true };
 }
 
 function redact(a) { const o = { ...a }; if (o.text && String(o.text).length > 80) o.text = String(o.text).slice(0, 80) + '…'; return o; }
@@ -230,7 +284,7 @@ export function makeLLM({ geminiKey, ai, fetchImpl = fetch, models = GEMINI_MODE
     if (geminiKey !== null) for (const m of models) {
       const gemma = m.startsWith('gemma');
       const cts = (last && last !== m) ? contents.map(c => ({ role: c.role, parts: c.parts.map(p => p.thoughtSignature ? { ...p, thoughtSignature: 'skip_thought_signature_validator' } : p) })) : contents;
-      const body = { contents: gemma ? cts.map(stripImg) : cts, tools: [{ functionDeclarations: tools }], generationConfig: { temperature: 0.3 } };
+      const body = { contents: gemma ? cts.map(stripImg) : cts, ...(tools && tools.length ? { tools: [{ functionDeclarations: tools }] } : {}), generationConfig: { temperature: 0.3 } };
       const headers = { 'content-type': 'application/json' }; if (keyInHeader && geminiKey) headers['x-goog-api-key'] = geminiKey;
       try {
         const r = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body) });
