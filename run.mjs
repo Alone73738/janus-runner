@@ -23,7 +23,10 @@ const started = Date.now();
 const images = new Map();
 let res;
 try {
-  const llm = makeLLM({ geminiKey: job.gemini || null, ai: null });
+  const ai = { run: async (model, input) => { // Workers AI fallback through the JANUS worker (encrypted)
+    const r = await fetch(job.cb.replace(/\/result$/, '/ai'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: await seal({ run: job.run, model, input }) }) });
+    const j = await r.json(); if (!j.blob) throw new Error('ai ' + r.status); const o = await open(j.blob); if (!o.ok) throw new Error(o.err); return o.out; } };
+  const llm = makeLLM({ geminiKey: job.gemini || null, ai });
   const ctx = {
     now: () => Date.now(), llm, lastModel: llm.lastModel,
     browser: () => puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }),
