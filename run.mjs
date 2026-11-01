@@ -16,6 +16,33 @@ async function open(s) { const [iv, ct] = s.split('.'); return JSON.parse(dec.de
 
 const CHROME = [process.env.CHROME, '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find(p => p && existsSync(p));
 
+// run_code: separate low-privilege user (nobody), empty env (no secrets), own folder, time limit.
+import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync, readdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
+const WD = '/tmp/janus-work'; const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', html: 'text/html' };
+async function runCode(lang, code, secs, ids, images) {
+  mkdirSync(WD + '/inputs', { recursive: true }); chmodSync(WD, 0o777); chmodSync(WD + '/inputs', 0o777);
+  for (const [id, im] of images) { const ext = (Object.entries(MIME).find(([, m]) => m === im.mime) || ['bin'])[0]; const f = `${WD}/inputs/${id}.${ext}`; try { statSync(f); } catch { writeFileSync(f, im.bytes); chmodSync(f, 0o644); } }
+  const before = new Map(readdirSync(WD).map(n => [n, statSync(WD + '/' + n).mtimeMs]));
+  const file = WD + '/_main.' + (lang === 'python' ? 'py' : lang === 'node' ? 'mjs' : 'sh'); writeFileSync(file, code); chmodSync(file, 0o644);
+  const cmd = lang === 'python' ? ['python3', file] : lang === 'node' ? ['node', file] : ['bash', file];
+  const env = ['HOME=' + WD, 'PATH=' + WD + '/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG=C.UTF-8', 'PYTHONUSERBASE=' + WD + '/.local', 'npm_config_cache=' + WD + '/.npm', 'MPLBACKEND=Agg'];
+  const out = await new Promise((res) => {
+    const pr = spawn('sudo', ['-n', '-u', 'nobody', 'env', '-i', ...env, 'timeout', String(secs), ...cmd], { cwd: WD, stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = ''; const add = (d) => { if (o.length < 200000) o += d.toString(); };
+    pr.stdout.on('data', add); pr.stderr.on('data', add); pr.on('close', (c) => res({ code: c, out: o })); pr.on('error', (e) => res({ code: -1, out: String(e.message) }));
+  });
+  const files = [];
+  for (const n of readdirSync(WD)) {
+    if (n.startsWith('_main.') || n === 'inputs' || n.startsWith('.')) continue;
+    let st; try { st = statSync(WD + '/' + n); } catch { continue; } if (!st.isFile() || before.get(n) === st.mtimeMs || st.size > 20e6) continue;
+    const ext = n.split('.').pop().toLowerCase(); const mime = MIME[ext]; if (!mime) continue;
+    const id = 'img_' + [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join('');
+    images.set(id, { bytes: new Uint8Array(readFileSync(WD + '/' + n)), mime }); files.push({ id, name: n, mime, bytes: st.size });
+  }
+  return { code: out.code, out: out.out, files };
+}
+
 let job;
 try { job = await open(process.env.JOB || ''); } catch { say('fail: bad job'); process.exit(1); }
 const wait = job.at - Date.now(); if (wait > 0) await new Promise(r => setTimeout(r, Math.min(wait, 10 * 60000)));
@@ -43,6 +70,7 @@ try {
       }
       return null; } : undefined,
     genImage2: async (prompt) => { const o = await ai.run('@cf/black-forest-labs/flux-1-schnell', { prompt: prompt.slice(0, 2000), steps: 8 }); return o && o.image ? { bytes: unb64(o.image), mime: 'image/jpeg' } : null; },
+    runCode: async (lang, code, secs, ids) => runCode(lang, code, secs, ids, images),
     images: { put: async (bytes, mime) => { const id = 'img_' + [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join(''); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
   };
   res = await runAgent(ctx, job.prompt, { maxSteps: job.maxSteps || 60 });
