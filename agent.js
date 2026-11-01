@@ -71,10 +71,13 @@ export async function readUrl(u) {
   return clip(h.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim(), 6000);
 }
 
-function sysPrompt(task, nowIso) {
+const SITE_TIPS = `Site tips: Pinterest new pin = open https://www.pinterest.com/pin-creation-tool/ (log in first if asked: click "Log in", then sign_in) → upload_image on the file input (element "input:file") → type title, description, link → click "Publish". Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
+function sysPrompt(task, nowIso, loginSites) {
   return `You are JANUS Cloud, the background worker of the JANUS app. You run a scheduled task by yourself while the user's phone may be off, so nobody can answer questions: decide sensibly and finish.
 Now: ${nowIso} (user timezone Asia/Kolkata).
-Rules: use tools; be efficient (few steps, browser time is limited); in the browser use open_url, list_elements, click/type by element number; for login forms call sign_in (you never see passwords); if a site needs an OTP/captcha/approval you cannot do, call finish with success=false and say what is needed. Never invent results. Always end with finish(result) in the user's language (short Hinglish if the task is Hinglish).
+Saved logins you can use with sign_in: ${loginSites && loginSites.length ? loginSites.join(', ') : 'NONE'}. If the task needs a site that is not in this list and it asks you to log in, do not guess: finish(success=false) saying exactly: "<site> ka login cloud mein share nahi hai. JANUS → Scheduled → Logins mein Share dabao." Saved browser cookies may already keep you logged in, so open the site first and check.
+Rules: use tools; be efficient; in the browser use open_url, list_elements, click/type by element number; for login forms call sign_in (you never see passwords); if a site needs an OTP/captcha/approval you cannot do, call finish with success=false and say what is needed. Never invent results. Never stop silently: every reply must call a tool, and the last one must be finish. On failure, say the exact reason and what the user should do. Always end with finish(result) in the user's language (short Hinglish if the task is Hinglish).
+${SITE_TIPS}
 TASK: ${task}`;
 }
 
@@ -86,8 +89,9 @@ export async function runAgent(ctx, task, opts = {}) {
     if (page) return page;
     browser = await ctx.browser();
     page = await browser.newPage();
-    await page.setViewport({ width: 412, height: 860, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
-    await page.setUserAgent('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36');
+    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36');
+    if (ctx.cookies && ctx.cookies.length) { try { const c = await page.createCDPSession(); await c.send('Network.setCookies', { cookies: ctx.cookies }); } catch { } }
     return page;
   };
   const el = async (id) => { const p = await getPage(); const h = await p.$(`[data-jn="${id}"]`); if (!h) throw new Error('element ' + id + ' not found; call list_elements'); return h; };
@@ -98,10 +102,17 @@ export async function runAgent(ctx, task, opts = {}) {
     read_url: async ({ url }) => await readUrl(url),
     generate_image: async ({ prompt }) => {
       let b = null, mime = 'image/jpeg';
-      if (ctx.genImage) { try { const g = await ctx.genImage(prompt); if (g) { b = g.bytes; mime = g.mime; } } catch (e) { } }
+      for (const g of [ctx.genImage, ctx.genImage2]) { if (b || !g) continue; try { const o = await g(prompt); if (o && o.bytes && o.bytes.length > 2000) { b = o.bytes; mime = o.mime; } } catch (e) { } }
       if (!b) {
-        const r = await fetch('https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt) + '?width=1024&height=1024&nologo=true&seed=' + Math.floor(Math.random() * 1e6));
-        if (!r.ok) throw new Error('image service ' + r.status);
+        const pl = prompt.toLowerCase(); const [w, h] = /pin|pinterest|wallpaper|portrait|vertical|story|reel|9:16|poster|phone/.test(pl) ? [1024, 1536] : /landscape|wide|banner|16:9|desktop|youtube|thumbnail/.test(pl) ? [1536, 864] : [1024, 1024];
+        let r;
+        for (let k = 0; k < 3; k++) {
+          r = await fetch('https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt.slice(0, 900)) + '?width=' + w + '&height=' + h + '&nologo=true&enhance=true&seed=' + Math.floor(Math.random() * 1e6));
+          if (r.ok) break;
+          const t = await r.text().catch(() => ''); const wait = +((/Retry after (\d+)s/.exec(t) || [])[1] || 0);
+          if (!(r.status === 402 || r.status === 429) || k === 2) throw new Error('image service busy (' + r.status + '), try generate_image again in a minute');
+          await new Promise(z => setTimeout(z, Math.min(Math.max(wait, 5), 60) * 1000 + 1000));
+        }
         b = new Uint8Array(await r.arrayBuffer()); mime = r.headers.get('content-type') || 'image/jpeg';
       }
       const id = await ctx.images.put(b, mime); images.push(id); return S({ image_id: id, bytes: b.length });
@@ -163,8 +174,9 @@ export async function runAgent(ctx, task, opts = {}) {
     },
   };
 
-  const contents = [{ role: 'user', parts: [{ text: sysPrompt(task, new Date(ctx.now()).toISOString()) }] }];
-  let result = null;
+  const loginSites = ctx.logins.list ? await ctx.logins.list() : [];
+  const contents = [{ role: 'user', parts: [{ text: sysPrompt(task, new Date(ctx.now()).toISOString(), loginSites) }] }];
+  let result = null, nudges = 0;
   try {
     for (let i = 0; i < maxSteps && !result; i++) {
       ctx.log && ctx.log('llm', {step: i});
@@ -172,7 +184,11 @@ export async function runAgent(ctx, task, opts = {}) {
       const parts = resp.parts || [];
       contents.push({ role: 'model', parts });
       const calls = parts.filter(p => p.functionCall);
-      if (!calls.length) { const t = parts.map(p => p.text || '').join('').trim(); result = { success: !!t, result: t || 'No answer.' }; break; }
+      if (!calls.length) {
+        const t = parts.filter(p => !p.thought).map(p => p.text || '').join('').trim();
+        if (nudges < 2) { nudges++; contents.push({ role: 'user', parts: [{ text: 'Continue the task now: call the next tool. When fully done (or truly impossible), call finish with the result' + (t ? '' : ' and the exact reason') + '.' }] }); continue; }
+        result = { success: false, result: t || 'Task beech mein ruk gaya (AI ne jawab nahi diya). Dobara Run karke dekho.' }; break;
+      }
       const outs = [];
       for (const c of calls) {
         const { name, args = {} } = c.functionCall;
@@ -188,8 +204,11 @@ export async function runAgent(ctx, task, opts = {}) {
       }
       if (!result) contents.push({ role: 'user', parts: outs });
     }
-  } finally { try { if (browser) await browser.close(); } catch { } }
-  if (!result) result = { success: false, result: 'Step limit reached before finishing.' };
+  } finally {
+    if (page && ctx.saveCookies) { try { const c = await page.createCDPSession(); const { cookies } = await c.send('Network.getAllCookies'); await ctx.saveCookies(cookies); } catch { } }
+    try { if (browser) await browser.close(); } catch { }
+  }
+  if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
   return { ...result, steps, images, model: ctx.lastModel && ctx.lastModel() };
 }
 
@@ -200,6 +219,13 @@ export function btoaBytes(u) { let s = ''; for (let i = 0; i < u.length; i += 0x
 export function makeLLM({ geminiKey, ai, fetchImpl = fetch, models = GEMINI_MODELS, keyInHeader = true }) {
   let last = null;
   const llm = async (contents, tools) => {
+    let lastErr;
+    for (let round = 0; round < 3; round++) {
+      try { return await once(contents, tools); } catch (e) { lastErr = e; if (!/429|empty|50\d|fetch/i.test(e.message)) break; await new Promise(r => setTimeout(r, 8000 * (round + 1))); }
+    }
+    throw lastErr;
+  };
+  const once = async (contents, tools) => {
     const errs = [];
     if (geminiKey !== null) for (const m of models) {
       const gemma = m.startsWith('gemma');
@@ -210,7 +236,7 @@ export function makeLLM({ geminiKey, ai, fetchImpl = fetch, models = GEMINI_MODE
         const r = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body) });
         if (!r.ok) { errs.push(m + ':' + r.status); continue; }
         const j = await r.json(); const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
-        if (!parts) { errs.push(m + ':empty'); continue; }
+        if (!parts || !parts.length) { errs.push(m + ':empty(' + (j.candidates && j.candidates[0] && j.candidates[0].finishReason || (j.promptFeedback && j.promptFeedback.blockReason) || '?') + ')'); continue; }
         last = m; return { parts };
       } catch (e) { errs.push(m + ':' + e.message); }
     }
