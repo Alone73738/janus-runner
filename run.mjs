@@ -19,14 +19,17 @@ const CHROME = [process.env.CHROME, '/usr/bin/google-chrome', '/usr/bin/google-c
 // run_code: separate low-privilege user (nobody), empty env (no secrets), own folder, time limit.
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, readdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
-const WD = '/tmp/janus-work'; const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', html: 'text/html' };
+const WD = '/tmp/janus-work'; const MIME = { apk: 'application/vnd.android.package-archive', aab: 'application/octet-stream', zip: 'application/zip', txt: 'text/plain', md: 'text/markdown', json: 'application/json', csv: 'text/csv', html: 'text/html', py: 'text/x-python', js: 'text/javascript', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', html: 'text/html' };
 async function runCode(lang, code, secs, ids, images) {
   mkdirSync(WD + '/inputs', { recursive: true }); chmodSync(WD, 0o777); chmodSync(WD + '/inputs', 0o777);
   for (const [id, im] of images) { const ext = (Object.entries(MIME).find(([, m]) => m === im.mime) || ['bin'])[0]; const f = `${WD}/inputs/${id}.${ext}`; try { statSync(f); } catch { writeFileSync(f, im.bytes); chmodSync(f, 0o644); } }
   const before = new Map(readdirSync(WD).map(n => [n, statSync(WD + '/' + n).mtimeMs]));
   const file = WD + '/_main.' + (lang === 'python' ? 'py' : lang === 'node' ? 'mjs' : 'sh'); writeFileSync(file, code); chmodSync(file, 0o644);
   const cmd = lang === 'python' ? ['python3', file] : lang === 'node' ? ['node', file] : ['bash', file];
-  const env = ['HOME=' + WD, 'PATH=' + WD + '/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG=C.UTF-8', 'PYTHONUSERBASE=' + WD + '/.local', 'npm_config_cache=' + WD + '/.npm', 'MPLBACKEND=Agg'];
+  const pe = process.env; const extraPath = [pe.JAVA_HOME && pe.JAVA_HOME + '/bin', pe.ANDROID_HOME && pe.ANDROID_HOME + '/cmdline-tools/latest/bin', pe.ANDROID_HOME && pe.ANDROID_HOME + '/platform-tools', ...(String(pe.PATH || '').split(':'))].filter(Boolean).join(':');
+  const env = ['HOME=' + WD, 'PATH=' + WD + '/.local/bin:' + extraPath, 'LANG=C.UTF-8', 'PYTHONUSERBASE=' + WD + '/.local', 'npm_config_cache=' + WD + '/.npm', 'MPLBACKEND=Agg'];
+  for (const k of ['JAVA_HOME', 'JAVA_HOME_17_X64', 'JAVA_HOME_21_X64', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'ANDROID_NDK_HOME', 'GRADLE_HOME']) if (pe[k]) env.push(k + '=' + pe[k]);
+  env.push('GRADLE_USER_HOME=' + WD + '/.gradle', 'ANDROID_USER_HOME=' + WD + '/.android');
   const out = await new Promise((res) => {
     const pr = spawn('sudo', ['-n', '-u', 'nobody', 'env', '-i', ...env, 'timeout', String(secs), ...cmd], { cwd: WD, stdio: ['ignore', 'pipe', 'pipe'] });
     let o = ''; const add = (d) => { if (o.length < 200000) o += d.toString(); };
@@ -35,10 +38,10 @@ async function runCode(lang, code, secs, ids, images) {
   const files = [];
   for (const n of readdirSync(WD)) {
     if (n.startsWith('_main.') || n === 'inputs' || n.startsWith('.')) continue;
-    let st; try { st = statSync(WD + '/' + n); } catch { continue; } if (!st.isFile() || before.get(n) === st.mtimeMs || st.size > 20e6) continue;
+    let st; try { st = statSync(WD + '/' + n); } catch { continue; } if (!st.isFile() || before.get(n) === st.mtimeMs || st.size > 24e6) continue;
     const ext = n.split('.').pop().toLowerCase(); const mime = MIME[ext]; if (!mime) continue;
     const id = 'img_' + [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join('');
-    images.set(id, { bytes: new Uint8Array(readFileSync(WD + '/' + n)), mime }); files.push({ id, name: n, mime, bytes: st.size });
+    images.set(id, { bytes: new Uint8Array(readFileSync(WD + '/' + n)), mime, name: n }); files.push({ id, name: n, mime, bytes: st.size });
   }
   return { code: out.code, out: out.out, files };
 }
@@ -71,11 +74,21 @@ try {
       return null; } : undefined,
     genImage2: async (prompt) => { const o = await ai.run('@cf/black-forest-labs/flux-1-schnell', { prompt: prompt.slice(0, 2000), steps: 8 }); return o && o.image ? { bytes: unb64(o.image), mime: 'image/jpeg' } : null; },
     runCode: async (lang, code, secs, ids) => runCode(lang, code, secs, ids, images),
+    maxCodeSecs: job.long ? 3000 : 600,
+    install: async (names) => {
+      const sh = (args, t) => new Promise((res) => { const pr = spawn('sudo', ['-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'timeout', String(t), ...args], { stdio: ['ignore', 'pipe', 'pipe'] }); let o = ''; const add = d => { if (o.length < 20000) o += d; }; pr.stdout.on('data', add); pr.stderr.on('data', add); pr.on('close', c => res({ c, o })); pr.on('error', e => res({ c: -1, o: String(e.message) })); });
+      if (!globalThis.__aptUpdated) { await sh(['apt-get', 'update', '-qq'], 300); globalThis.__aptUpdated = true; }
+      const r = await sh(['apt-get', 'install', '-y', '-qq', '--no-install-recommends', ...names], 900);
+      return (r.c === 0 ? 'Installed: ' + names.join(', ') : 'apt exit ' + r.c + '\n' + r.o.slice(-3000));
+    },
     images: { put: async (bytes, mime) => { const id = 'img_' + [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join(''); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
   };
-  res = await runAgent(ctx, job.prompt, { maxSteps: job.maxSteps || 60 });
+  res = await runAgent(ctx, job.prompt, { maxSteps: job.maxSteps || 60, job: !!job.long });
 } catch (e) { res = { success: false, result: 'Error: ' + (e && e.message || e), steps: [], images: [] }; }
 const imgs = (res.images || []).map(id => images.get(id) && { id, mime: images.get(id).mime, b64: b64(images.get(id).bytes) }).filter(Boolean);
+let budget = 60e6; const outFiles = [];
+for (const id of (res.files || []).slice(-8).reverse()) { const f = images.get(id); if (!f || f.bytes.length > budget) continue; budget -= f.bytes.length; outFiles.push({ id, name: f.name || id, mime: f.mime, b64: b64(f.bytes) }); }
+res.files = outFiles;
 const body = await seal({ run: job.run, ...res, images: imgs, cookies: outCookies, started, finished: Date.now() });
 for (let i = 0; i < 4; i++) {
   try { const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: body }) }); if (r.ok) { say(res.success ? 'ok' : 'fail'); process.exit(0); } } catch { }
