@@ -1,6 +1,6 @@
 // JANUS runner tools (shared by run.mjs and the local test harness).
 import puppeteer from 'puppeteer-core';
-import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, resolve as presolve, relative } from 'node:path';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -42,11 +42,11 @@ async function runCode(lang, code, secs, ids, imgs) {
 
 const safe = (rel) => { const p = presolve(WD, String(rel || '').replace(/^\/+/, '')); if (relative(WD, p).startsWith('..')) throw new Error('path must stay inside the work folder'); return p; };
 const fs = {
-  async write(rel, content) {
-    const p = safe(rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, content);
+  async write(rel, content, append) {
+    const p = safe(rel); mkdirSync(dirname(p), { recursive: true }); if (append && existsSync(p)) appendFileSync(p, content); else writeFileSync(p, content);
     try { chmodSync(p, 0o666); let d = dirname(p); while (d.length > WD.length) { chmodSync(d, 0o777); d = dirname(d); } } catch { }
     const top = dirname(p) === WD ? registerTop(relative(WD, p)) : null;
-    return { msg: 'Wrote ' + relative(WD, p) + ' (' + content.length + ' chars)' + (top ? ' — will be sent to the user' : ''), file: top };
+    return { msg: (append ? 'Appended to ' : 'Wrote ') + relative(WD, p) + ' (now ' + statSync(p).size + ' bytes)' + (top ? ' — will be sent to the user' : ''), file: top };
   },
   async read(rel) {
     const p = safe(rel);
@@ -57,7 +57,7 @@ const fs = {
 };
 
 // ---- self-test: phone-sized headless Chromium, screenshots, errors, vision critique ----
-const CHECK = `Quality checklist: fills the phone screen in portrait (no letterbox/black bars, no tiny canvas), clear start screen, swipe/touch controls (no reliance on tiny arrow buttons), in-page game-over screen with score + retry (never alert()), a real-looking player/world (not a blob), HUD readable with safe-area padding, sound + mute, difficulty ramps up, smooth animation, no JS errors.`;
+const CHECK = `Quality checklist: fills the phone screen in portrait (no letterbox/black bars, no tiny canvas), clear start screen, swipe/touch controls (no reliance on tiny arrow buttons), in-page game-over screen with score + retry (never alert()), a real-looking player/world (not a blob), HUD readable with safe-area padding, sound + mute, difficulty ramps up, smooth animation, no JS errors. Note: □ boxes in place of emoji are only a missing font on the test machine (phones show emoji) — ignore them.`;
 let llmRef = null;
 async function testWebApp(rel, focus, task) {
   let file; try { file = safe(rel); } catch (e) { return { text: String(e.message) }; }
