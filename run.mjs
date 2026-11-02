@@ -87,7 +87,7 @@ try {
 } catch (e) { res = { success: false, result: 'Error: ' + (e && e.message || e), steps: [], images: [] }; }
 const imgs = (res.images || []).map(id => images.get(id) && { id, mime: images.get(id).mime, b64: b64(images.get(id).bytes) }).filter(Boolean);
 const outFiles = []; const fileUrl = job.cb.replace(/\/result$/, '/file');
-for (const id of (res.files || []).slice(-8).reverse()) { // raw upload, no base64/JSON work for the Worker
+const seenNames = new Set(); for (const id of (res.files || []).slice().reverse()) { const nm = images.get(id) && images.get(id).name; if (!nm || seenNames.has(nm) || seenNames.size >= 8) continue; seenNames.add(nm); // raw upload, newest copy per name, no base64/JSON work for the Worker
   const f = images.get(id); if (!f || !job.ft) continue;
   try { const q = new URLSearchParams({ run: job.run, t: job.ft, name: f.name || id, mime: f.mime || 'application/octet-stream' });
     const r = await fetch(fileUrl + '?' + q, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f.bytes });
