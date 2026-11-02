@@ -122,7 +122,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
       const r = await fetchImpl(P.base + '/chat/completions', { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer ' + keys[p], 'content-type': 'application/json', accept: stream ? 'text/event-stream' : 'application/json' }, body: S(body) });
       if (!r.ok) { const t = await r.text().catch(() => ''); throw Object.assign(new Error(p + ' ' + r.status + ' ' + t.slice(0, 120)), { status: r.status }); }
       let content = '', calls = [];
-      if (stream && /event-stream/.test(r.headers.get('content-type') || '')) { const s = await readSSE(r, ac, o.firstMs || 40000, o.idleMs || 60000); content = s.content; calls = s.calls; }
+      if (stream && /event-stream/.test(r.headers.get('content-type') || '')) { const s = await readSSE(r, ac, o.firstMs || 40000, o.idleMs || 300000); content = s.content; calls = s.calls; }
       else { const j = await r.json(); const msg = j.choices && j.choices[0] && j.choices[0].message || {}; content = msg.content || ''; calls = (msg.tool_calls || []).map(t => ({ id: t.id, name: t.function.name, args: t.function.arguments })); }
       const parts = [];
       const txt = String(content || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^[\s\S]*?<\/think>/, '').trim();
@@ -132,6 +132,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
       return parts;
     } catch (e) {
       if (e.name === 'AbortError' || /abort/i.test(e.message || '')) throw Object.assign(new Error(p + ' timeout'), { status: 'timeout' });
+      if (/terminated|socket|ECONNRESET|other side closed/i.test(e.message || '')) throw Object.assign(new Error(p + ' connection cut'), { status: 'cut' });
       throw e;
     } finally { clearTimeout(hard); }
   }
@@ -148,6 +149,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     if (!parts || !parts.length) throw Object.assign(new Error('gemini empty'), { status: 'empty' });
     return parts;
   }
+  let cutSeen = false;
   async function once(contents, tools, o) {
     const errs = [];
     const list = expand(o.route || 'main');
@@ -161,28 +163,30 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
             const parts = p === 'gemini' ? await callGemini(mm, contents, tools, o) : await callOAI(p, mm, contents, tools, o);
             last = k2; log && log('model', k2); return { parts, model: k2 };
           } catch (e) {
-            const s = e.status; errs.push(k2 + ':' + s);
+            const s = e.status; errs.push(k2 + ':' + s); if (s === 'cut' || s === 504) cutSeen = true; log && log('fail', k2 + ' ' + s + ' ' + String(e.message || '').slice(0, 80));
             if (s === 429 && !e.daily && attempt < 2) { await sleep(attempt ? 4000 : 1500); continue; } // back-off, then fall back
             if ((s >= 500 || s === 'empty') && attempt < 1) { await sleep(2000); continue; }
-            cool.set(k2, Date.now() + (s === 404 || s === 403 || s === 401 ? 6 * 3600e3 : s === 'timeout' ? 10 * 60e3 : e.daily ? 3 * 3600e3 : s === 429 ? 60e3 : s === 400 ? 0 : 3 * 60e3));
+            cool.set(k2, Date.now() + (s === 404 || s === 403 || s === 401 ? 6 * 3600e3 : s === 'timeout' ? 10 * 60e3 : s === 'cut' ? 20e3 : e.daily ? 3 * 3600e3 : s === 429 ? 60e3 : s === 400 ? 0 : 3 * 60e3));
             break;
           }
         }
       }
     }
-    if (ai && o.route !== 'vision') { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; }
+    if (ai && o.route !== 'vision') { try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); } }
     throw new Error('All models failed: ' + errs.slice(-8).join(', '));
   }
   const llm = async (contents, tools, opts = {}) => {
     const o = typeof opts === 'string' ? { route: opts } : opts;
     if (!o.route) o.route = 'main';
     let lastErr;
-    for (let round = 0; round < 3; round++) {
-      try { return await once(contents, tools, o); } catch (e) { lastErr = e; await sleep(6000 * (round + 1)); cool.clear(); }
+    const waits = o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000]; // free rate limits are per minute
+    for (let round = 0; round <= waits.length; round++) {
+      try { return await once(contents, tools, o); } catch (e) { lastErr = e; if (round < waits.length) { await sleep(waits[round]); cool.clear(); } }
     }
     throw lastErr;
   };
   llm.lastModel = () => last;
+  llm.takeCut = () => { const c = cutSeen; cutSeen = false; return c; }; // a reply was cut (too long for the provider's deadline)
   llm.available = (route) => expand(route).map(x => x.p + ':' + x.m);
   return llm;
 }
