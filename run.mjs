@@ -86,12 +86,23 @@ try {
   res = await runAgent(ctx, job.prompt, { maxSteps: job.maxSteps || 60, job: !!job.long });
 } catch (e) { res = { success: false, result: 'Error: ' + (e && e.message || e), steps: [], images: [] }; }
 const imgs = (res.images || []).map(id => images.get(id) && { id, mime: images.get(id).mime, b64: b64(images.get(id).bytes) }).filter(Boolean);
-let budget = 60e6; const outFiles = [];
-for (const id of (res.files || []).slice(-8).reverse()) { const f = images.get(id); if (!f || f.bytes.length > budget) continue; budget -= f.bytes.length; outFiles.push({ id, name: f.name || id, mime: f.mime, b64: b64(f.bytes) }); }
+const outFiles = []; const fileUrl = job.cb.replace(/\/result$/, '/file');
+for (const id of (res.files || []).slice(-8).reverse()) { // raw upload, no base64/JSON work for the Worker
+  const f = images.get(id); if (!f || !job.ft) continue;
+  try { const q = new URLSearchParams({ run: job.run, t: job.ft, name: f.name || id, mime: f.mime || 'application/octet-stream' });
+    const r = await fetch(fileUrl + '?' + q, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f.bytes });
+    if (r.ok) { const j = await r.json(); outFiles.push({ id: j.id, name: f.name || id, mime: f.mime, bytes: f.bytes.length }); } } catch { }
+}
 res.files = outFiles;
-const body = await seal({ run: job.run, ...res, images: imgs, cookies: outCookies, started, finished: Date.now() });
+const steps = (res.steps || []).slice(-60);
+const body = await seal({ run: job.run, ...res, steps, result: String(res.result || '').slice(0, 8000), images: imgs.slice(0, 6), cookies: outCookies, started, finished: Date.now() });
+let last = '';
 for (let i = 0; i < 4; i++) {
-  try { const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: body }) }); if (r.ok) { say(res.success ? 'ok' : 'fail'); process.exit(0); } } catch { }
+  try { const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: body }) }); if (r.ok) { say(res.success ? 'ok' : 'fail'); process.exit(0); } last = 'http ' + r.status; } catch (e) { last = String(e && e.message || e).slice(0, 80); }
   await new Promise(r => setTimeout(r, 3000 * (i + 1)));
 }
+try { // tell the app why, with a tiny body
+  const small = await seal({ run: job.run, success: !!res.success, result: String(res.result || '').slice(0, 3000) + '\n\n(Report upload failed: ' + last + ')', files: outFiles, steps: [], images: [], started, finished: Date.now() });
+  const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: small }) }); if (r.ok) { say('fail: big report'); process.exit(0); }
+} catch { }
 say('fail: callback'); process.exit(1);
