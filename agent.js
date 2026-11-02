@@ -287,7 +287,7 @@ function redact(a) { const o = { ...a }; if (o.text && String(o.text).length > 8
 export function btoaBytes(u) { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
 
 // ---- LLM: Gemini (fallback chain) then Workers AI ----
-export function makeLLM({ geminiKey, ai, fetchImpl = fetch, models = GEMINI_MODELS, keyInHeader = true }) {
+export function makeLLM({ geminiKey, ai, fetchImpl = fetch, models = GEMINI_MODELS, keyInHeader = true, oai = {} }) {
   let last = null;
   const llm = async (contents, tools) => {
     let lastErr;
@@ -311,11 +311,31 @@ export function makeLLM({ geminiKey, ai, fetchImpl = fetch, models = GEMINI_MODE
         last = m; return { parts };
       } catch (e) { errs.push(m + ':' + e.message); }
     }
+    for (const [pid, key] of Object.entries(oai || {})) { if (!key || !OAI_P[pid]) continue; try { const r = await oaiCall(fetchImpl, OAI_P[pid], key, contents, tools); if (r) { last = pid + ':' + r.model; return { parts: r.parts }; } } catch (e) { errs.push(pid + ':' + e.message); } }
     if (ai) { const r = await workersAI(ai, contents, tools); last = 'workers-ai'; return r; }
     throw new Error('All models failed: ' + errs.join(', '));
   };
   llm.lastModel = () => last;
   return llm;
+}
+const OAI_P = { groq: { base: 'https://api.groq.com/openai/v1' }, openrouter: { base: 'https://openrouter.ai/api/v1', free: true }, cerebras: { base: 'https://api.cerebras.ai/v1' } };
+const lc = (x) => Array.isArray(x) ? x.map(lc) : x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, k === 'type' && typeof v === 'string' ? v.toLowerCase() : lc(v)])) : x;
+async function oaiCall(f, P, key, contents, tools) {
+  const H = { authorization: 'Bearer ' + key, 'content-type': 'application/json' };
+  if (!P._m) { P._m = P.models || []; try { const r = await f(P.base + '/models', { headers: H }); const j = await r.json(); const ids = (j.data || []).filter(m => !/whisper|tts|guard|embed|audio/i.test(m.id) && (!P.free || (/:free$/.test(m.id) && (!m.supported_parameters || m.supported_parameters.includes('tools'))))).map(m => m.id); const rk = []; for (const re of [/qwen3-coder|qwen-3-coder/i, /kimi-k2/i, /gpt-oss-120b/i, /deepseek/i, /glm/i, /qwen/i, /llama-3\.3-70b|llama-4/i, /./]) for (const id of ids) if (re.test(id) && !rk.includes(id)) rk.push(id); if (rk.length) P._m = rk.slice(0, 4); } catch { } }
+  const models = P._m;
+  const msgs = []; let pend = [];
+  contents.forEach((c, ci) => { const parts = c.parts || [];
+    if (c.role === 'model') { const calls = parts.filter(p => p.functionCall).map((p, k) => ({ id: 'c' + ci + '_' + k, type: 'function', function: { name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args || {}) } })); pend = calls.slice(); const t = parts.filter(p => p.text && !p.thought).map(p => p.text).join(''); msgs.push(calls.length ? { role: 'assistant', content: t || null, tool_calls: calls } : { role: 'assistant', content: t || '…' }); }
+    else { const ex = []; parts.forEach(p => { if (p.functionResponse) { const i = pend.findIndex(t => t.function.name === p.functionResponse.name); const t = i >= 0 ? pend.splice(i, 1)[0] : null; if (t) msgs.push({ role: 'tool', tool_call_id: t.id, content: String(p.functionResponse.response && p.functionResponse.response.result || '').slice(0, 15000) }); } else if (p.text) ex.push(p.text); else if (p.inlineData) ex.push('[screenshot omitted]'); }); pend.forEach(t => msgs.push({ role: 'tool', tool_call_id: t.id, content: '(no result)' })); pend = []; if (ex.length) msgs.push({ role: 'user', content: ex.join('\n') }); } });
+  for (const m of models || []) {
+    const r = await f(P.base + '/chat/completions', { method: 'POST', headers: H, body: JSON.stringify({ model: m, messages: msgs, max_tokens: 8192, temperature: 0.3, ...(tools && tools.length ? { tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: lc(t.parameters) } })), tool_choice: 'auto' } : {}) }) });
+    if (!r.ok) continue; const j = await r.json(); const msg = j.choices && j.choices[0] && j.choices[0].message; if (!msg) continue;
+    const parts = []; if (msg.content) parts.push({ text: String(msg.content).replace(/<think>[\s\S]*?<\/think>/g, '').trim() });
+    for (const t of msg.tool_calls || []) { let a = {}; try { a = JSON.parse(t.function.arguments || '{}'); } catch { } parts.push({ functionCall: { name: t.function.name, args: a } }); }
+    if (parts.length) return { model: m, parts };
+  }
+  return null;
 }
 function stripImg(c) { return { role: c.role, parts: c.parts.filter(p => !p.inlineData) }; }
 
