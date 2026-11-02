@@ -22,7 +22,7 @@ export const TOOLS = [
   { name: 'look_at_screen', description: 'Screenshot the current page; returns a precise description of what is visible.', parameters: { type: 'object', properties: { question: { type: 'string', description: 'what you want to check on the screen' } } } },
   { name: 'sign_in', description: 'Sign in on the current page with the saved login for this site (or the saved Google login on accounts.google.com): fills email/username + password and presses the sign-in button. You never see the password. Call when a login form is visible (call again on a second password page).', parameters: { type: 'object', properties: {} } },
   { name: 'upload_image', description: 'Put a generated image or a file from run_code (its id) into a file-upload element.', parameters: { type: 'object', properties: { element_id: { type: 'integer' }, image_id: { type: 'string' } }, required: ['element_id', 'image_id'] } },
-  { name: 'write_file', description: 'Create or overwrite a text file in the work folder (code, html, json, md…). path is relative, e.g. "game/index.html". Write COMPLETE files, never placeholders.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+  { name: 'write_file', description: 'Create or overwrite a text file in the work folder (code, html, json, md…). path is relative, e.g. "game/index.html". Write COMPLETE files, never placeholders. Big files (more than ~150 lines): write them in parts — the first call creates the file, the next calls use append=true with the following part (each part ≤ ~150 lines), in order. Long single calls get cut off by the AI provider.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, append: { type: 'boolean' } }, required: ['path', 'content'] } },
   { name: 'read_file', description: 'Read a text file from the work folder (first 20000 chars), or list a folder when path ends with "/".', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
   { name: 'run_code', description: 'Run code on the cloud computer (Linux, Python 3, Node 20, Java 17, Android SDK, Gradle; internet on; pip install --user / npm i allowed; no sudo). Use for builds, tests, data work, image/video editing (Pillow, ffmpeg). Files saved at the TOP LEVEL of the work folder come back to the user as files. Input images are in ./inputs/<image_id>.<ext>.', parameters: { type: 'object', properties: { language: { type: 'string', enum: ['python', 'node', 'bash'] }, code: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['language', 'code'] } },
   { name: 'install_packages', description: 'Install Ubuntu (apt) packages on the cloud computer, e.g. ["ffmpeg","imagemagick"]. pip/npm packages: install them inside run_code instead.', parameters: { type: 'object', properties: { apt: { type: 'array', items: { type: 'string' } } }, required: ['apt'] } },
@@ -100,7 +100,7 @@ const GAME_PLAYBOOK = `QUALITY PLAYBOOK for web apps & games (follow every point
 - Robust: no console errors, works offline from one index.html (inline CSS/JS) unless the user asked for more files; handle visibilitychange (pause), resize and orientation.`;
 
 const SELFTEST = `SELF-TEST LOOP (mandatory for anything visual you build: games, web apps, pages):
-1) write the files → 2) test_web_app(path) → 3) read the critique + errors + screen-usage numbers → 4) fix every real problem with write_file → 5) test_web_app again. Do at least 2 full polish rounds for a game (more if the reviewer still finds problems), then finish. If you package it as an Android app (WebView wrapper APK), test the web part first, then build.`;
+1) write the files → 2) test_web_app(path) → 3) read the critique + errors + screen-usage numbers → 4) fix every real problem with write_file → 5) test_web_app again. Do at least 2 full polish rounds for a game; keep going while the reviewer finds real problems, but at most 5 rounds — once there are no JS errors and the big issues are fixed, finish. Ignore □ boxes where emoji should be (the test machine has no emoji font; phones show them). If you package it as an Android app (WebView wrapper APK), test the web part first, then build.`;
 
 const JOB_TIPS = `CLOUD COMPUTER: you have a full Ubuntu machine: write_file/read_file, run_code (bash/python/node, up to ~50 min per call), install_packages (apt), internet, Java 17 (JAVA_HOME), Android SDK (ANDROID_HOME, platforms + build-tools), Gradle, Python 3, Node 20, headless Chromium (test_web_app). Work like a senior engineer: plan, write files, run, read errors, fix, repeat until it truly works.
 - Android app: complete Gradle project (AGP + Gradle wrapper or a pinned distribution), ./gradlew assembleDebug --no-daemon, then COPY the .apk to the TOP LEVEL of the work folder (cp app/build/outputs/apk/debug/app-debug.apk ./MyApp.apk). For a game, a WebView wrapper around your tested index.html (fullscreen, portrait, immersive) is fine and fast.
@@ -248,7 +248,7 @@ export async function runAgent(ctx, task, opts = {}) {
       const p = await getPage(); await settle(p); await new Promise(z => setTimeout(z, 2500));
       return 'image put into the page via ' + ok + '. Check the page shows the image now (if not, try another file input or look_at_screen):\n' + (await p.evaluate(MARK_JS));
     },
-    write_file: async ({ path, content }) => { if (!ctx.fs) return 'write_file is only available on the cloud computer.'; const r = await ctx.fs.write(String(path || ''), String(content ?? '')); if (r.file) files.push(r.file.id); return r.msg; },
+    write_file: async ({ path, content, append }) => { if (!ctx.fs) return 'write_file is only available on the cloud computer.'; const r = await ctx.fs.write(String(path || ''), String(content ?? ''), !!append); if (r.file) files.push(r.file.id); return r.msg; },
     read_file: async ({ path }) => { if (!ctx.fs) return 'read_file is only available on the cloud computer.'; return clip(await ctx.fs.read(String(path || '')), 20000); },
     test_web_app: async ({ path, focus }) => {
       if (!ctx.testWebApp) return 'test_web_app is only available on the cloud computer.';
@@ -288,7 +288,7 @@ export async function runAgent(ctx, task, opts = {}) {
     contents.push({ role: 'user', parts });
   } else contents = [{ role: 'user', parts: [{ text: 'Do the task now.' }] }];
   const hasImg = contents.some(c => (c.parts || []).some(p => p.inlineData));
-  let result = null, nudges = 0, checks = 0, cont = null;
+  let result = null, nudges = 0, checks = 0, cont = null, cutHint = false, hintNow = false, llmFails = 0;
   const tools = TOOLS.filter(t => (ctx.runCode || !RUNNER_ONLY.includes(t.name)) && (t.name !== 'write_file' || ctx.fs) && (t.name !== 'test_web_app' || ctx.testWebApp));
   try {
     for (let i = 0; i < maxSteps && !result; i++) {
@@ -296,8 +296,15 @@ export async function runAgent(ctx, task, opts = {}) {
       if (contents.length > 40) { // keep long jobs lean: old screenshots out, old tool outputs short
         for (const c of contents.slice(1, -12)) { if (c._c) continue; c._c = 1; c.parts = (c.parts || []).filter(p => !p.inlineData || c === contents[contents.length - 1]).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 700) } } } : (p.functionCall && p.functionCall.name === 'write_file') ? { functionCall: { name: 'write_file', args: { path: p.functionCall.args.path, content: '(written, ' + String(p.functionCall.args.content || '').length + ' chars; read_file to see it)' } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
       }
-      const resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: 600000 });
+      let resp;
+      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: 600000 }); llmFails = 0; }
+      catch (e) { // every free model busy: wait and retry this step instead of throwing the whole job away
+        if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: 'AI models are busy, waiting a minute', step: stepNo }); await new Promise(z => setTimeout(z, 60000)); i--; continue; }
+        const made = files.length ? ' Jo files ban chuki hain woh neeche hain.' : '';
+        result = { success: false, result: 'Abhi saare free AI models busy/limit pe hain, isliye kaam beech mein rukna pada (' + steps.length + ' steps ho chuke the).' + made + ' Thodi der baad "continue" bolo.' }; break;
+      }
       const parts = (resp.parts || []).filter(p => p.text || p.functionCall);
+      if (ctx.llm.takeCut && ctx.llm.takeCut() && !cutHint) { cutHint = true; hintNow = true; }
       if (!parts.length) parts.push({ text: '' });
       contents.push({ role: 'model', parts });
       const calls = parts.filter(p => p.functionCall);
@@ -338,6 +345,7 @@ export async function runAgent(ctx, task, opts = {}) {
           try { const b = await page.screenshot({ type: 'jpeg', quality: 45, encoding: 'base64' }); lastShotAt = ctx.now(); await progress({ label: label(name, args), step: stepNo, shot: b }); } catch { }
         }
       }
+      if (hintNow) { hintNow = false; outs.push({ text: '[JANUS: one of your replies was too long and got cut off by the AI provider. Keep every tool call short from now on: write big files in parts of at most 150 lines (first write_file, then write_file with append=true).]' }); }
       if (fresh.length) outs.push({ text: fresh.map(t => '[NEW MESSAGE from the user while you work — handle it together with the current task]: ' + t).join('\n') });
       if (!result && outs.length) contents.push({ role: 'user', parts: outs });
     }
