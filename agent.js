@@ -25,6 +25,7 @@ export const TOOLS = [
   { name: 'sign_in', description: 'Sign in on the current page with the saved login for this site: fills email/username + password and presses the sign-in button. You never see the password. Call when a login form is visible (call again on a second password page).', parameters: { type: 'object', properties: {} } },
   { name: 'upload_image', description: 'Put a generated image or a file from run_code (its id) into a file-upload element.', parameters: { type: 'object', properties: { element_id: { type: 'integer' }, image_id: { type: 'string' } }, required: ['element_id', 'image_id'] } },
   { name: 'run_code', description: 'Run code on the cloud computer (Linux, Python 3, Node 20, ffmpeg if installed; internet on; pip install --user / npm i allowed; no sudo). Use for big scripts, data work, image/video editing (Pillow, ffmpeg, moviepy), making files. Files you save in the current folder come back as file ids (images/videos can then go to upload_image). Input files: generated images are in ./inputs/<image_id>.<ext>.', parameters: { type: 'object', properties: { language: { type: 'string', enum: ['python', 'node', 'bash'] }, code: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['language', 'code'] } },
+  { name: 'install_packages', description: 'Install Ubuntu (apt) packages on the cloud computer, e.g. ["ffmpeg","imagemagick","openjdk-21-jdk"]. pip/npm packages: install them inside run_code instead (pip install --user / npm i).', parameters: { type: 'object', properties: { apt: { type: 'array', items: { type: 'string' } } }, required: ['apt'] } },
   { name: 'finish', description: 'Task done (or impossible). Give the final short result for the user.', parameters: { type: 'object', properties: { result: { type: 'string' }, success: { type: 'boolean' } }, required: ['result', 'success'] } },
 ];
 
@@ -73,6 +74,12 @@ export async function readUrl(u) {
 }
 
 const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_image (it is free and returns an image_id). If the task says to make the image on Bing Image Creator, Leonardo, Canva or another generator website, do NOT open that site (it needs a Microsoft/other account and downloads don't work here): silently use generate_image instead, which gives the same kind of image, and continue with the rest of the task. Never fail a task just because of the image site. Pinterest: first open https://www.pinterest.com/login/ and call sign_in (skip if already logged in: the page then redirects away from /login), then open https://www.pinterest.com/pin-creation-tool/ (if it redirects to the home page you are NOT logged in). On that page: upload_image into the "input:file" element (Upload your media; JPG/PNG up to 20MB, MP4 up to 200MB) → wait/list_elements until the image preview shows → type the title into "Tell everyone what your Pin is about" / "Add a title" → type the description into "Describe your Pin" / "Add a detailed description" (it is a text box, click it then type) → optional: link, "Choose a board" → click the red "Publish" button (it appears at the top only after the image is uploaded) → confirm with read_page that Pinterest says it was published / shows the new pin. If a "Save draft"/"Publish" choice appears, choose Publish. Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
+const JOB_TIPS = `
+
+THIS IS A CLOUD COMPUTER JOB (sent from the phone just now, may run for hours). You have a full Ubuntu computer: run_code (bash/python/node, up to ~50 min per call, can be called many times), install_packages (apt), internet, Java 17 (JAVA_HOME), Android SDK (ANDROID_HOME, platforms + build-tools), Gradle, Python 3, Node 20. Work like a senior engineer: plan, write files, run, read errors, fix, repeat until it really works. Don't stop early.
+- Android app: create a complete Gradle project (Kotlin or Java, AGP + Gradle wrapper via "gradle wrapper" or a pinned distribution), build with ./gradlew assembleDebug (use --no-daemon), then COPY the .apk to the top level of the current folder (e.g. cp app/build/outputs/apk/debug/app-debug.apk ./MyApp.apk).
+- Files you want the user to get (apk, zip, pdf, images, video, code) MUST be copied to the top level of the current folder; also zip source code (zip -r project.zip project) when you wrote code.
+- finish with a short Hinglish summary of what you built and how to use it.`;
 function sysPrompt(task, nowIso, loginSites) {
   return `You are JANUS Cloud, the background worker of the JANUS app. You run a scheduled task by yourself while the user's phone may be off, so nobody can answer questions: decide sensibly and finish.
 Now: ${nowIso} (user timezone Asia/Kolkata).
@@ -84,7 +91,7 @@ TASK: ${task}`;
 
 export async function runAgent(ctx, task, opts = {}) {
   const maxSteps = opts.maxSteps || 25;
-  const steps = []; const images = [];
+  const steps = []; const images = []; const files = [];
   let browser = null, page = null;
   const getPage = async () => {
     if (page) return page;
@@ -181,9 +188,15 @@ export async function runAgent(ctx, task, opts = {}) {
     },
     run_code: async ({ language, code, timeout_sec }) => {
       if (!ctx.runCode) return 'run_code is not available on this runner (only on the GitHub runner).';
-      const r = await ctx.runCode(language, String(code || ''), Math.min(Math.max(+timeout_sec || 120, 10), 600), images);
-      for (const f of r.files || []) if (f.mime.startsWith('image/')) images.push(f.id);
+      const r = await ctx.runCode(language, String(code || ''), Math.min(Math.max(+timeout_sec || 120, 10), ctx.maxCodeSecs || 600), images);
+      for (const f of r.files || []) { if (f.mime.startsWith('image/')) images.push(f.id); else files.push(f.id); }
       return 'exit ' + r.code + '\n' + clip(r.out || '', 5000) + (r.files && r.files.length ? '\nFILES: ' + r.files.map(f => f.name + ' → ' + f.id + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
+    },
+    install_packages: async ({ apt }) => {
+      if (!ctx.install) return 'Installing packages is only possible on the GitHub runner.';
+      const names = (Array.isArray(apt) ? apt : [apt]).map(String).filter(n => /^[a-z0-9][a-z0-9+.\-]{0,80}$/.test(n)).slice(0, 30);
+      if (!names.length) return 'No valid package names.';
+      return await ctx.install(names);
     },
     upload_image: async ({ element_id, image_id }) => {
       const img = await ctx.images.get(image_id); if (!img) throw new Error('unknown image_id');
@@ -202,11 +215,14 @@ export async function runAgent(ctx, task, opts = {}) {
   };
 
   const loginSites = ctx.logins.list ? await ctx.logins.list() : [];
-  const contents = [{ role: 'user', parts: [{ text: sysPrompt(task, new Date(ctx.now()).toISOString(), loginSites) }] }];
+  const contents = [{ role: 'user', parts: [{ text: sysPrompt(task, new Date(ctx.now()).toISOString(), loginSites) + (opts.job ? JOB_TIPS : '') }] }];
   let result = null, nudges = 0, checks = 0;
   try {
     for (let i = 0; i < maxSteps && !result; i++) {
       ctx.log && ctx.log('llm', {step: i});
+      if (contents.length > 40) { // keep long jobs lean: old screenshots out, old tool outputs short
+        for (const c of contents.slice(1, -12)) { c.parts = (c.parts || []).filter(p => !p.inlineData).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 600) } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
+      }
       const resp = await ctx.llm(contents, ctx.runCode ? TOOLS : TOOLS.filter(t => t.name !== 'run_code'));
       const parts = resp.parts || [];
       contents.push({ role: 'model', parts });
@@ -243,7 +259,7 @@ export async function runAgent(ctx, task, opts = {}) {
     try { if (browser) await browser.close(); } catch { }
   }
   if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
-  return { ...result, steps, images, model: ctx.lastModel && ctx.lastModel() };
+  return { ...result, steps, images, files: files.slice(-8), model: ctx.lastModel && ctx.lastModel() };
 }
 
 // Checker: never let the agent claim a success its own steps don't show.
