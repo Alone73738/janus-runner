@@ -478,7 +478,7 @@ export async function runAgent(ctx, task, opts = {}) {
         let out, img = null;
         try { const f = impl[name]; if (!f) throw new Error('unknown tool'); out = await f(args); if (out && typeof out === 'object') { img = out.image; out = out.text; } }
         catch (e) { out = 'ERROR: ' + (e && e.message || e); }
-        steps.push({ tool: name, args: redact(args), out: clip(String(out), 400) });
+        steps.push({ tool: name, args: redact(args), out: clip(String(out), name === 'spawn_agents' ? 1600 : 400) });
         outs.push({ functionResponse: { name, response: { result: clip(String(out), 9000) } } });
         if (img) outs.push({ inlineData: { mimeType: 'image/jpeg', data: img } });
         if (page && BROWSER.includes(name) && name !== 'look_at_screen' && ctx.progress && ctx.now() - lastShotAt > 2500) { // live view for the phone
@@ -516,8 +516,8 @@ export async function verify(ctx, task, steps, claim, tests = []) {
   if (tests.length && tests[tests.length - 1].errors > 0 && steps.length < 260) return { ok: false, reason: 'the last self-test still shows JavaScript errors; fix them and test again' };
   if (/\bapk\b/.test(t) && !/\.apk/i.test(steps.map(s => s.out).join(' ')) && !negated) return { ok: false, reason: 'no .apk file was produced at the top level of the work folder' };
   try {
-    const log = steps.slice(-80).map((s, i) => (i + 1) + '. ' + s.tool + ' ' + JSON.stringify(s.args).slice(0, 120) + ' => ' + String(s.out).replace(/\s+/g, ' ').slice(0, 160)).join('\n');
-    const r = await ctx.llm([{ role: 'user', parts: [{ text: 'You are a strict checker. TASK:\n' + clip(task, 3000) + '\n\nSTEPS the agent actually did:\n' + log + '\n\nAGENT CLAIMS: ' + clip(claim, 2000) + '\n\nDo the steps PROVE every part of the task was really done (e.g. a post really published, a file really built and tested, not just a page opened)? For pure questions/answers with no action needed, answer done=true. Reply ONLY JSON: {"done": true|false, "reason": "short missing part"}' }] }], [], { route: 'fast', timeoutMs: 60000 });
+    const log = steps.slice(-80).map((s, i) => (i + 1) + '. ' + s.tool + ' ' + JSON.stringify(s.args).slice(0, 120) + ' => ' + String(s.out).replace(/\s+/g, ' ').slice(0, s.tool === 'spawn_agents' ? 1500 : 160)).join('\n');
+    const r = await ctx.llm([{ role: 'user', parts: [{ text: 'You are a strict checker. TASK:\n' + clip(task, 3000) + '\n\nSTEPS the agent actually did:\n' + log + '\n\nAGENT CLAIMS: ' + clip(claim, 2000) + '\n\nDo the steps PROVE every part of the task was really done (e.g. a post really published, a file really built and tested, not just a page opened)? For pure questions/answers with no action needed, answer done=true. Results reported by parallel sub-agents (spawn_agents) count as proof of what those agents did. Reply ONLY JSON: {"done": true|false, "reason": "short missing part"}' }] }], [], { route: 'fast', timeoutMs: 60000 });
     const txt = (r.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
     const j = JSON.parse((txt.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     if (j.done === false) return { ok: false, reason: String(j.reason || 'steps do not show the task was completed').slice(0, 200) };
