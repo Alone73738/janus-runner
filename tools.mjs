@@ -113,6 +113,34 @@ async function testWebApp(rel, focus, task) {
   } finally { try { await b.close(); } catch { } }
 }
 
+// ---- real Chrome extensions for the cloud browser (unpacked zip or .crx) ----
+// Branded Google Chrome ≥137 ignores --load-extension, so extensions run in Chrome for Testing (downloaded on demand).
+async function prepChromeExts(list, fetchImpl = fetch) {
+  const dirs = []; const names = [];
+  for (const e of (list || []).slice(0, 6)) {
+    try {
+      const r = await fetchImpl(e.url, { signal: AbortSignal.timeout(60000) }); if (!r.ok) continue;
+      let b = new Uint8Array(await r.arrayBuffer()); if (b.length > 40e6) continue;
+      if (b[0] === 0x43 && b[1] === 0x72 && b[2] === 0x32 && b[3] === 0x34) { // "Cr24" CRX header → strip to the zip
+        const dv = new DataView(b.buffer, b.byteOffset); const ver = dv.getUint32(4, true);
+        b = ver === 3 ? b.slice(12 + dv.getUint32(8, true)) : b.slice(16 + dv.getUint32(8, true) + dv.getUint32(12, true));
+      }
+      const id = String(e.id || rid()).replace(/[^\w-]/g, '').slice(0, 40) || rid(); const dir = '/tmp/janus-ext/' + id;
+      mkdirSync(dir, { recursive: true }); writeFileSync(dir + '.zip', b);
+      await sh('unzip', ['-o', '-q', dir + '.zip', '-d', dir]);
+      if (existsSync(dir + '/manifest.json')) { dirs.push(dir); names.push(e.name || id); }
+    } catch { }
+  }
+  if (!dirs.length) return null;
+  let exe = process.env.JANUS_EXT_CHROME || null;
+  if (!exe) {
+    const r = await sh('npx', ['-y', '@puppeteer/browsers@2', 'install', 'chrome@stable', '--path', '/tmp/cft'], { cwd: '/tmp' });
+    const m = /chrome@\S+\s+(\S+)/.exec(r.out || ''); if (m && existsSync(m[1])) exe = m[1];
+  }
+  if (!exe) return null;
+  return { exe, names, args: ['--disable-extensions-except=' + dirs.join(','), '--load-extension=' + dirs.join(',')] };
+}
+
 
 export function setLLM(f) { llmRef = f; }
-export { CHROME, WD, MIME, images, registerTop, sh, runCode, fs, testWebApp };
+export { CHROME, WD, MIME, images, registerTop, sh, runCode, fs, testWebApp, prepChromeExts };
