@@ -1,32 +1,84 @@
-// JANUS model router (portable: Cloudflare Worker, Durable Object, GitHub runner, Node tests).
-// Free providers only. Contents use the Gemini shape: [{role:'user'|'model', parts:[{text}|{functionCall}|{functionResponse}|{inlineData}]}].
-// Order per route (from the owner's plan, 2026-11-02). A model that is missing for this account (404), hangs or
-// rate-limits is retried with back-off, then skipped silently for a while. Model names never reach the user.
+// JANUS model router v3 (portable: Cloudflare Worker, Durable Object, GitHub runner, Node tests).
+// CONFIG-DRIVEN: every free provider is one entry in PROVIDERS (base URL, models per role, limits). A new
+// OpenAI-compatible provider needs no code: the phone's "Any AI provider" connector sends {id, base, models, rpm}
+// and it is appended as a custom provider. Seeded from the 2026-11-04 free-provider research
+// (GitHub Models retired, Cerebras no longer free → last, never hardcode gemini-2.5-*).
+// Per-provider rate limiting (requests/min, tokens/min, min gap, in-flight cap) is shared by every caller of one
+// router instance, so 10 parallel sub-agents spread across providers instead of hitting 429s.
+// Contents use the Gemini shape: [{role:'user'|'model', parts:[{text}|{functionCall}|{functionResponse}|{inlineData}]}].
 
-export const GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemma-4-26b-a4b-it'];
-const GEMINI_LITE = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-3.1-flash-lite'];
-
-export const PROVIDERS = {
-  nvidia: { base: 'https://integrate.api.nvidia.com/v1' },
-  mistral: { base: 'https://api.mistral.ai/v1', gap: 1150 }, // free tier ≈ 1 request / second
-  groq: { base: 'https://api.groq.com/openai/v1', pick: [/kimi-k2/i, /gpt-oss-120b/i, /qwen3/i, /llama-3\.3-70b/i, /llama-4/i] },
-  cerebras: { base: 'https://api.cerebras.ai/v1', pick: [/qwen-3-coder|qwen-3-235b/i, /gpt-oss/i, /qwen/i, /llama/i] },
-  openrouter: { base: 'https://openrouter.ai/api/v1', free: true, pick: [/qwen3-coder/i, /kimi/i, /deepseek/i, /glm/i, /gpt-oss/i, /qwen/i, /llama/i] },
+export const GEMINI = {
+  main: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3-flash-preview'],
+  code: ['gemini-3.8-flash', 'gemini-3.6-flash'],
+  vision: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'],
+  fast: ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'],
 };
+export const GEMINI_MODELS = [...new Set([...GEMINI.main, ...GEMINI.fast, 'gemma-4-26b-a4b-it'])];
 
-const KIMI = 'nvidia:moonshotai/kimi-k2.6', NEMO = 'nvidia:nvidia/nemotron-3-ultra-550b-a55b', DSEEK = 'nvidia:deepseek-ai/deepseek-v4.1-flash', MINIMAX = 'nvidia:minimaxai/minimax-m3.1-flash';
-export const ROUTES = {
-  main: [KIMI, NEMO, DSEEK, 'gemini:flash', MINIMAX, 'groq:*', 'cerebras:*', 'openrouter:*', 'mistral:mistral-medium-latest'],
-  code: ['mistral:codestral-latest', KIMI, NEMO, DSEEK, 'gemini:flash', MINIMAX, 'groq:*', 'cerebras:*', 'openrouter:*'],
-  vision: ['gemini:flash', 'nvidia:google/gemma-4-31b-it', 'nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b', 'nvidia:meta/llama-3.2-90b-vision-instruct'],
-  fast: ['groq:*', 'cerebras:*', NEMO, MINIMAX, 'gemini:lite', 'mistral:mistral-small-latest', KIMI],
+/** id, base, key ('none' = keyless), rpm / tpm / gapMs / inflight limits, maxIn = max request size in tokens,
+ *  models[role] = ordered model ids (verified against the provider's live /models when a key exists). */
+export const PROVIDERS = [
+  { id: 'gemini', kind: 'gemini', rpm: 10, inflight: 4 },
+  { id: 'nvidia', base: 'https://integrate.api.nvidia.com/v1', rpm: 38, inflight: 8, models: {
+    main: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash', 'moonshotai/kimi-k2.6', 'minimaxai/minimax-m3.1-flash'],
+    code: ['deepseek-ai/deepseek-v4.1-flash', 'nvidia/nemotron-3-ultra-550b-a55b', 'moonshotai/kimi-k2.6'],
+    vision: ['nvidia/nemotron-3.5-super-vl-120b-a12b', 'google/gemma-4-31b-it'],
+    fast: ['nvidia/nemotron-3.5-lightning-30b-a3b', 'minimaxai/minimax-m3.1-flash', 'nvidia/nemotron-3-super-120b-a12b'] } },
+  { id: 'groq', base: 'https://api.groq.com/openai/v1', rpm: 28, tpm: 7600, maxIn: 5500, inflight: 4, models: { // 8K TPM: short jobs only
+    fast: ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b'], code: ['openai/gpt-oss-120b'], main: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'] } },
+  { id: 'openrouter', base: 'https://openrouter.ai/api/v1', rpm: 18, inflight: 3, models: {
+    main: ['nvidia/nemotron-3-ultra-550b-a55b:free'], code: ['cohere/north-mini-code:free', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+    vision: ['nvidia/nemotron-3.5-super-vl:free', 'google/gemma-4-31b-it:free'], fast: ['nvidia/nemotron-3.5-lightning:free'] } },
+  { id: 'mistral', base: 'https://api.mistral.ai/v1', rpm: 50, gapMs: 1100, inflight: 1, models: {
+    code: ['codestral-latest', 'mistral-code-latest'], main: ['mistral-medium-latest'], fast: ['mistral-small-latest'], vision: ['mistral-medium-latest'] } },
+  { id: 'zai', base: 'https://api.z.ai/api/paas/v4', rpm: 20, inflight: 2, models: { vision: ['glm-4.6v-flash'], fast: ['glm-4.7-flash', 'glm-4.5-flash'], main: ['glm-4.7-flash'] } },
+  { id: 'cfai', base: 'https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1', rpm: 60, inflight: 3, models: { // 10k neurons/day
+    main: ['@cf/openai/gpt-oss-120b'], code: ['@cf/qwen/qwen3.8-27b', '@cf/openai/gpt-oss-120b'], fast: ['@cf/zai-org/glm-4.7-flash', '@cf/openai/gpt-oss-20b'], vision: ['@cf/meta/llama-4-scout-17b-16e-instruct'] } },
+  { id: 'hetzner', base: 'https://inference.hetzner.com/api/v1', rpm: 10, inflight: 2, models: { main: ['Qwen/Qwen3.8-27B'], vision: ['Qwen/Qwen3.8-27B'], fast: ['Qwen/Qwen3.6-35B-A3B-FP8'], code: ['Qwen/Qwen3.8-27B'] } },
+  { id: 'llm7', base: 'https://api.llm7.io/v1', rpm: 55, gapMs: 1050, inflight: 1, models: { code: ['codestral-latest'], fast: ['mistral-Nemo-Instruct-2407'] } },
+  { id: 'sambanova', base: 'https://api.sambanova.ai/v1', rpm: 18, inflight: 2, models: { main: ['DeepSeek-V3.1'], code: ['gpt-oss-120b'] } }, // 20 req/day: last resort
+  { id: 'kilo', base: 'https://api.kilo.ai/api/gateway', key: 'none', rpm: 3, inflight: 2, models: { // keyless, ~200 req/hour per IP
+    main: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'kilo-auto/free'], code: ['cohere/north-mini-code:free', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+    vision: ['nvidia/nemotron-3.5-super-vl:free'], fast: ['nvidia/nemotron-3.5-lightning:free', 'kilo-auto/free'] } },
+  { id: 'cerebras', base: 'https://api.cerebras.ai/v1', rpm: 5, inflight: 1, models: { main: ['gpt-oss-120b'], code: ['gpt-oss-120b'], fast: ['gpt-oss-120b'] } }, // trial credit only now
+];
+/** Provider order per role (custom providers are inserted before the keyless/trial tail). */
+export const ROLE_ORDER = {
+  main: ['gemini', 'nvidia', 'openrouter', 'groq', 'zai', 'mistral', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
+  code: ['nvidia', 'groq', 'mistral', 'openrouter', 'gemini', 'llm7', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
+  vision: ['gemini', 'zai', 'nvidia', 'openrouter', 'hetzner', 'mistral', 'cfai', '*custom', 'kilo'],
+  fast: ['groq', 'gemini', 'zai', 'nvidia', 'cfai', 'mistral', 'openrouter', 'llm7', '*custom', 'kilo', 'cerebras'],
 };
-const VISION_OK = /gemma-4|vl-|vision|kimi-k2\.6/i; // OpenAI-compatible models we send images to
+export const PROVIDER_IDS = PROVIDERS.map(p => p.id);
+const VISION_OK = /gemma-4|vl|vision|kimi-k2\.6|glm-4\.6v|llama-4-scout|qwen3\.8|mistral-medium/i;
 
 const S = (o) => JSON.stringify(o);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const lc = (x) => Array.isArray(x) ? x.map(lc) : x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, k === 'type' && typeof v === 'string' ? v.toLowerCase() : lc(v)])) : x;
 const hasImages = (contents) => contents.some(c => (c.parts || []).some(p => p.inlineData));
+export const estTokens = (contents, system, tools) => Math.ceil((S(contents).replace(/"data":"[^"]{200,}"/g, '"data":"img"').length + String(system || '').length + S(tools || []).length) / 3.6);
+
+/** Sliding-window limiter per provider: requests/min, tokens/min, min gap between calls, max in flight. */
+export function makeLimiter(now = () => Date.now()) {
+  const st = new Map();
+  const get = (id) => { let s = st.get(id); if (!s) { s = { hits: [], inflight: 0, last: 0, until: 0 }; st.set(id, s); } return s; };
+  return {
+    /** ms to wait before this provider can take a request of ~tok tokens (0 = go now). */
+    wait(P, tok = 0) {
+      const s = get(P.id); const t = now(); s.hits = s.hits.filter(h => t - h.t < 60000);
+      let w = Math.max(0, s.until - t);
+      if (P.inflight && s.inflight >= P.inflight) w = Math.max(w, 1500);
+      if (P.gapMs) w = Math.max(w, s.last + P.gapMs - t);
+      if (P.rpm && s.hits.length >= P.rpm) w = Math.max(w, s.hits[s.hits.length - P.rpm].t + 60000 - t);
+      if (P.tpm && tok) { let sum = tok; for (let i = s.hits.length - 1; i >= 0; i--) { sum += s.hits[i].tok; if (sum > P.tpm) { w = Math.max(w, s.hits[i].t + 60000 - t); break; } } }
+      return w;
+    },
+    take(P, tok = 0) { const s = get(P.id); s.hits.push({ t: now(), tok }); s.last = now(); s.inflight++; },
+    done(P, realTok) { const s = get(P.id); s.inflight = Math.max(0, s.inflight - 1); if (realTok && s.hits.length) s.hits[s.hits.length - 1].tok = realTok; },
+    block(P, ms) { const s = get(P.id); s.until = Math.max(s.until, now() + ms); },
+    stats() { const o = {}; for (const [k, s] of st) o[k] = { lastMin: s.hits.length, inflight: s.inflight, blockedMs: Math.max(0, s.until - now()) }; return o; },
+  };
+}
 
 /** Gemini-shaped contents → OpenAI messages. Images become image_url only for vision models. */
 export function toOpenAI(contents, system, vision) {
@@ -53,14 +105,13 @@ export function toOpenAI(contents, system, vision) {
       else if (txt.length) msgs.push({ role: 'user', content: txt.join('\n') });
     }
   });
-  // providers reject two user turns in a row less often than an assistant turn first; make sure we start with user
   if (msgs.length && msgs[0].role === 'assistant') msgs.unshift({ role: 'user', content: '…' });
   return msgs;
 }
 
 /** Read an OpenAI SSE stream: content + tool_calls. Aborts when nothing arrives for firstMs (hung model). */
 async function readSSE(r, ac, firstMs, idleMs) {
-  const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = '', content = '', got = false; const calls = [];
+  const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = '', content = '', got = false, usage = 0; const calls = [];
   let timer = setTimeout(() => ac.abort('first'), firstMs);
   const bump = () => { clearTimeout(timer); timer = setTimeout(() => ac.abort('idle'), idleMs); };
   try {
@@ -72,7 +123,7 @@ async function readSSE(r, ac, firstMs, idleMs) {
         if (!line.startsWith('data:')) continue; const d = line.slice(5).trim(); if (!d || d === '[DONE]') continue;
         let j; try { j = JSON.parse(d); } catch { continue; }
         if (j.error) throw Object.assign(new Error(String(j.error.message || 'stream error').slice(0, 160)), { status: j.error.code || 500 });
-        got = true; bump();
+        got = true; bump(); if (j.usage && j.usage.total_tokens) usage = j.usage.total_tokens;
         const dl = j.choices && j.choices[0] && j.choices[0].delta || {};
         if (dl.content) content += dl.content;
         for (const tc of dl.tool_calls || []) {
@@ -82,57 +133,73 @@ async function readSSE(r, ac, firstMs, idleMs) {
       }
     }
   } finally { clearTimeout(timer); }
-  return { got, content, calls: calls.filter(Boolean) };
+  return { got, content, usage, calls: calls.filter(Boolean) };
 }
 
-export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase = 'https://generativelanguage.googleapis.com', geminiKeyInHeader = true, stream = true, log = null } = {}) {
-  const cool = new Map(); // model → until(ms)
-  const lastHit = {};     // provider → ts (spacing for Mistral)
-  let last = null;
-  const has = (p) => p === 'gemini' ? (keys.gemini !== undefined && keys.gemini !== null && (keys.gemini !== '' || !geminiKeyInHeader)) : !!keys[p];
-  const expand = (route) => {
+/** keys: { gemini, nvidia, groq, …, cfai_account, custom: [{id, base, key, models:[…] | {role:[…]}, rpm, tpm, roles}] } */
+export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase = 'https://generativelanguage.googleapis.com', geminiKeyInHeader = true, stream = true, log = null, limiter = null, providers = PROVIDERS, keyless = true } = {}) {
+  const cool = new Map(); // provider:model → until(ms)
+  const lim = limiter || makeLimiter();
+  const live = {};        // provider → Set(live model ids) | null (unknown)
+  let last = null, cutSeen = false;
+  const custom = (Array.isArray(keys.custom) ? keys.custom : []).filter(c => c && /^https:\/\//.test(c.base || '') && /^[a-z0-9_-]{2,30}$/.test(c.id || '')).map(c => {
+    const ms = Array.isArray(c.models) ? c.models.filter(Boolean) : null; const roles = c.roles && c.roles.length ? c.roles : ['main', 'code', 'fast'];
+    return { id: 'x_' + c.id, base: c.base.replace(/\/+$/, ''), key: c.key || 'none', rpm: +c.rpm || 20, tpm: +c.tpm || 0, inflight: +c.inflight || 2, custom: true, models: ms ? Object.fromEntries(roles.map(r => [r, ms])) : (c.models || {}) };
+  });
+  const all = [...providers, ...custom];
+  const P = (id) => all.find(p => p.id === id);
+  const keyOf = (p) => p.key === 'none' ? '' : (p.custom ? p.key : keys[p.id]);
+  const has = (p) => {
+    if (p.kind === 'gemini') return keys.gemini !== undefined && keys.gemini !== null && (keys.gemini !== '' || !geminiKeyInHeader);
+    if (p.key === 'none') return p.custom || keyless;
+    if (p.id === 'cfai' && !keys.cfai_account) return false;
+    return !!keyOf(p);
+  };
+  const baseOf = (p) => p.base.replace('{account}', encodeURIComponent(keys.cfai_account || ''));
+  const expand = (role) => {
     const out = [];
-    for (const spec of ROUTES[route] || ROUTES.main) {
-      const [p, m] = [spec.slice(0, spec.indexOf(':')), spec.slice(spec.indexOf(':') + 1)];
-      if (!has(p)) continue;
-      if (p === 'gemini') (m === 'lite' ? GEMINI_LITE : GEMINI_MODELS).forEach(x => out.push({ p, m: x }));
-      else out.push({ p, m });
+    for (const id of ROLE_ORDER[role] || ROLE_ORDER.main) {
+      const list = id === '*custom' ? custom : [P(id)].filter(Boolean);
+      for (const p of list) {
+        if (!has(p)) continue;
+        const ms = p.kind === 'gemini' ? (GEMINI[role] || GEMINI.main) : ((p.models || {})[role] || []);
+        for (const m of ms) out.push({ p, m });
+      }
     }
     return out;
   };
-  async function pickModels(p) { // "groq:*" → that provider's best live models
-    const P = PROVIDERS[p]; if (P._m) return P._m;
-    P._m = [];
+  async function verifyLive(p) { // model ids change often: check the provider's live list once (keyed providers only)
+    if (p.kind === 'gemini' || p.key === 'none' || p.id in live) return;
+    live[p.id] = null;
     try {
-      const r = await fetchImpl(P.base + '/models', { headers: { authorization: 'Bearer ' + keys[p] }, signal: AbortSignal.timeout(15000) });
-      const j = await r.json(); const ids = (j.data || []).filter(m => !/whisper|tts|guard|embed|audio|image/i.test(m.id) && (!P.free || (/:free$/.test(m.id) && (!m.supported_parameters || m.supported_parameters.includes('tools'))))).map(m => m.id);
-      for (const re of P.pick || [/./]) for (const id of ids) if (re.test(id) && !P._m.includes(id)) P._m.push(id);
-      P._m = P._m.slice(0, 3);
+      const r = await fetchImpl(baseOf(p) + '/models', { headers: { authorization: 'Bearer ' + keyOf(p) }, signal: AbortSignal.timeout(12000) });
+      if (!r.ok) return; const j = await r.json(); const ids = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
+      if (ids.length) live[p.id] = new Set(ids);
     } catch { }
-    return P._m;
   }
   async function callOAI(p, m, contents, tools, o) {
-    const P = PROVIDERS[p]; const vision = o.route === 'vision' || VISION_OK.test(m);
-    if (P.gap) { const w = (lastHit[p] || 0) + P.gap - Date.now(); if (w > 0) await sleep(w); lastHit[p] = Date.now(); }
-    const body = { model: m, messages: toOpenAI(contents, o.system, vision && hasImages(contents)), max_tokens: o.maxTokens || 8192, temperature: o.temperature ?? 0.3 };
+    const vision = o.route === 'vision' || VISION_OK.test(m);
+    const body = { model: m, messages: toOpenAI(contents, o.system, vision && hasImages(contents)), max_tokens: Math.min(o.maxTokens || 8192, p.maxOut || 32768), temperature: o.temperature ?? 0.3 };
     if (tools && tools.length) { body.tools = tools.map(t => ({ type: 'function', function: { name: t.name, description: String(t.description || '').slice(0, 1000), parameters: lc(t.parameters || { type: 'object', properties: {} }) } })); body.tool_choice = 'auto'; }
     const ac = new AbortController(); const hard = setTimeout(() => ac.abort('total'), o.timeoutMs || 300000);
     try {
-      if (stream) body.stream = true;
-      const r = await fetchImpl(P.base + '/chat/completions', { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer ' + keys[p], 'content-type': 'application/json', accept: stream ? 'text/event-stream' : 'application/json' }, body: S(body) });
-      if (!r.ok) { const t = await r.text().catch(() => ''); throw Object.assign(new Error(p + ' ' + r.status + ' ' + t.slice(0, 120)), { status: r.status }); }
-      let content = '', calls = [];
-      if (stream && /event-stream/.test(r.headers.get('content-type') || '')) { const s = await readSSE(r, ac, o.firstMs || 40000, o.idleMs || 300000); content = s.content; calls = s.calls; }
-      else { const j = await r.json(); const msg = j.choices && j.choices[0] && j.choices[0].message || {}; content = msg.content || ''; calls = (msg.tool_calls || []).map(t => ({ id: t.id, name: t.function.name, args: t.function.arguments })); }
+      if (stream) { body.stream = true; body.stream_options = { include_usage: true }; }
+      const h = { 'content-type': 'application/json', accept: stream ? 'text/event-stream' : 'application/json' }; const k = keyOf(p); if (k) h.authorization = 'Bearer ' + k;
+      if (p.id === 'openrouter') { h['HTTP-Referer'] = 'https://janus.app'; h['X-Title'] = 'JANUS'; }
+      const r = await fetchImpl(baseOf(p) + '/chat/completions', { method: 'POST', signal: ac.signal, headers: h, body: S(body) });
+      if (!r.ok) { const t = await r.text().catch(() => ''); const ra = +(r.headers.get('retry-after') || 0); throw Object.assign(new Error(p.id + ' ' + r.status + ' ' + t.slice(0, 120)), { status: r.status, retryAfter: ra, daily: /per ?day|daily|RPD/i.test(t) }); }
+      let content = '', calls = [], usage = 0;
+      if (stream && /event-stream/.test(r.headers.get('content-type') || '')) { const s = await readSSE(r, ac, o.firstMs || 40000, o.idleMs || 300000); content = s.content; calls = s.calls; usage = s.usage; }
+      else { const j = await r.json(); const msg = j.choices && j.choices[0] && j.choices[0].message || {}; content = msg.content || ''; usage = j.usage && j.usage.total_tokens || 0; calls = (msg.tool_calls || []).map(t => ({ id: t.id, name: t.function.name, args: t.function.arguments })); }
       const parts = [];
       const txt = String(content || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^[\s\S]*?<\/think>/, '').trim();
       if (txt) parts.push({ text: txt });
       for (const c of calls) { let a = {}; try { a = JSON.parse(c.args || '{}'); } catch { a = {}; } if (c.name) parts.push({ functionCall: { name: c.name, args: a } }); }
-      if (!parts.length) throw Object.assign(new Error(p + ' empty'), { status: 'empty' });
-      return parts;
+      if (!parts.length) throw Object.assign(new Error(p.id + ' empty'), { status: 'empty' });
+      parts.usage = usage; return parts;
     } catch (e) {
-      if (e.name === 'AbortError' || /abort/i.test(e.message || '')) throw Object.assign(new Error(p + ' timeout'), { status: 'timeout' });
-      if (/terminated|socket|ECONNRESET|other side closed/i.test(e.message || '')) throw Object.assign(new Error(p + ' connection cut'), { status: 'cut' });
+      if (e.name === 'AbortError' || /abort/i.test(e.message || '')) throw Object.assign(new Error(p.id + ' timeout'), { status: 'timeout' });
+      if (/terminated|socket|ECONNRESET|other side closed/i.test(e.message || '')) throw Object.assign(new Error(p.id + ' connection cut'), { status: 'cut' });
       throw e;
     } finally { clearTimeout(hard); }
   }
@@ -143,51 +210,61 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     if (tools && tools.length) body.tools = [{ functionDeclarations: tools }];
     const headers = { 'content-type': 'application/json' }; if (geminiKeyInHeader && keys.gemini) headers['x-goog-api-key'] = keys.gemini;
-    const r = await fetchImpl(`${geminiBase}/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body), signal: AbortSignal.timeout(o.timeoutMs || 180000) }).catch(e => { throw Object.assign(new Error('gemini timeout'), { status: 'timeout' }); });
+    const r = await fetchImpl(`${geminiBase}/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body), signal: AbortSignal.timeout(o.timeoutMs || 180000) }).catch(() => { throw Object.assign(new Error('gemini timeout'), { status: 'timeout' }); });
     if (!r.ok) { const t = await r.text().catch(() => ''); throw Object.assign(new Error('gemini ' + r.status + ' ' + t.slice(0, 120)), { status: r.status, daily: /per ?day/i.test(t) }); }
     const j = await r.json(); const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
     if (!parts || !parts.length) throw Object.assign(new Error('gemini empty'), { status: 'empty' });
     return parts;
   }
-  let cutSeen = false;
   async function once(contents, tools, o) {
-    const errs = [];
-    const list = expand(o.route || 'main');
-    for (const { p, m } of list) {
-      const key = p + ':' + m; if ((cool.get(key) || 0) > Date.now()) continue;
-      const models = m === '*' ? await pickModels(p) : [m];
-      for (const mm of models) {
-        const k2 = p + ':' + mm; if ((cool.get(k2) || 0) > Date.now()) continue;
-        for (let attempt = 0; attempt < 3; attempt++) {
+    const errs = []; const tok = estTokens(contents, o.system, tools);
+    let list = expand(o.route || 'main');
+    if (o.spread && list.length > 1) { const provs = [...new Set(list.map(x => x.p.id))]; const lead = provs[o.spread % Math.min(provs.length, 3)]; list = [...list.filter(x => x.p.id === lead), ...list.filter(x => x.p.id !== lead)]; }
+    for (let pass = 0; pass < 2; pass++) {
+      let minWait = Infinity, deferred = 0;
+      for (let i = 0; i < list.length; i++) {
+        const { p, m } = list[i]; const k2 = p.id + ':' + m;
+        if ((cool.get(k2) || 0) > Date.now()) continue;
+        if (p.maxIn && tok > p.maxIn) continue; // e.g. Groq 8K TPM: keep its requests short
+        await verifyLive(p); if (live[p.id] && !live[p.id].has(m)) { cool.set(k2, Date.now() + 6 * 3600e3); continue; }
+        const w = lim.wait(p, tok);
+        if (w > 0 && (pass === 0 || w > 65000)) { if (w < minWait) minWait = w; deferred++; continue; } // busy: try the next provider
+        if (w > 0) await sleep(w);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          lim.take(p, tok); let ok = false, used = 0;
           try {
-            const parts = p === 'gemini' ? await callGemini(mm, contents, tools, o) : await callOAI(p, mm, contents, tools, o);
-            last = k2; log && log('model', k2); return { parts, model: k2 };
+            const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, o) : await callOAI(p, m, contents, tools, o);
+            ok = true; used = parts.usage || 0; last = k2; log && log('model', k2); return { parts, model: k2 };
           } catch (e) {
             const s = e.status; errs.push(k2 + ':' + s); if (s === 'cut' || s === 504) cutSeen = true; log && log('fail', k2 + ' ' + s + ' ' + String(e.message || '').slice(0, 80));
-            if (s === 429 && !e.daily && attempt < 2) { await sleep(attempt ? 4000 : 1500); continue; } // back-off, then fall back
-            if ((s >= 500 || s === 'empty') && attempt < 1) { await sleep(2000); continue; }
-            cool.set(k2, Date.now() + (s === 404 || s === 403 || s === 401 ? 6 * 3600e3 : s === 'timeout' ? 10 * 60e3 : s === 'cut' ? 20e3 : e.daily ? 3 * 3600e3 : s === 429 ? 60e3 : s === 400 ? 0 : 3 * 60e3));
+            if (s === 401 && p.kind !== 'gemini') { lim.block(p, 6 * 3600e3); break; } // bad key: skip the whole provider
+            if (s === 429) { lim.block(p, e.retryAfter ? e.retryAfter * 1000 : e.daily ? 3 * 3600e3 : 20000); break; } // switch provider on 429
+            if ((s >= 500 || s === 'empty') && attempt < 1 && list.length < 3) { await sleep(1500); continue; }
+            cool.set(k2, Date.now() + (s === 404 || s === 403 || s === 401 ? 6 * 3600e3 : s === 'timeout' ? 10 * 60e3 : s === 'cut' ? 20e3 : s === 400 ? 0 : 2 * 60e3));
             break;
-          }
+          } finally { lim.done(p, ok ? used : 0); }
         }
       }
+      if (!deferred) break;
+      if (pass === 0) await sleep(Math.min(minWait, 20000));
     }
     if (ai && o.route !== 'vision') { try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); } }
     throw new Error('All models failed: ' + errs.slice(-8).join(', '));
   }
   const llm = async (contents, tools, opts = {}) => {
-    const o = typeof opts === 'string' ? { route: opts } : opts;
+    const o = typeof opts === 'string' ? { route: opts } : { ...opts };
     if (!o.route) o.route = 'main';
     let lastErr;
-    const waits = o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000]; // free rate limits are per minute
+    const waits = o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000];
     for (let round = 0; round <= waits.length; round++) {
       try { return await once(contents, tools, o); } catch (e) { lastErr = e; if (round < waits.length) { await sleep(waits[round]); cool.clear(); } }
     }
     throw lastErr;
   };
   llm.lastModel = () => last;
-  llm.takeCut = () => { const c = cutSeen; cutSeen = false; return c; }; // a reply was cut (too long for the provider's deadline)
-  llm.available = (route) => expand(route).map(x => x.p + ':' + x.m);
+  llm.takeCut = () => { const c = cutSeen; cutSeen = false; return c; };
+  llm.available = (route) => expand(route || 'main').map(x => x.p.id + ':' + x.m);
+  llm.limiter = lim;
   return llm;
 }
 
