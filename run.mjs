@@ -3,7 +3,8 @@
 import puppeteer from 'puppeteer-core';
 import { writeFileSync, statSync, readFileSync } from 'node:fs';
 import { runAgent, makeRouter } from './agent.js';
-import { CHROME, WD, images, sh, runCode, fs, testWebApp, setLLM, prepChromeExts } from './tools.mjs';
+import { CHROME, WD, images, sh, runCode, fs, testWebApp, setLLM, prepChromeExts, download } from './tools.mjs';
+import { freemem } from 'node:os';
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 const b64 = (u) => Buffer.from(u).toString('base64');
@@ -55,7 +56,7 @@ try {
     genImage2: async (prompt) => { const o = await ai.run('@cf/black-forest-labs/flux-1-schnell', { prompt: prompt.slice(0, 2000), steps: 8 }); return o && o.image ? { bytes: unb64(o.image), mime: 'image/jpeg' } : null; },
     runCode: async (lang, code, secs, ids) => runCode(lang, code, secs, ids, images),
     maxCodeSecs: pay.long || pay.kind === 'chat' ? 3000 : 600,
-    fs, testWebApp,
+    fs, testWebApp, download, memFree: () => freemem(), subPages: 12,
     install: async (names) => {
       const run = (args, t) => sh('sudo', ['-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'timeout', String(t), ...args]);
       if (!globalThis.__aptUpdated) { await run(['apt-get', 'update', '-qq'], 300); globalThis.__aptUpdated = true; }
@@ -64,8 +65,8 @@ try {
     },
     images: { put: async (bytes, mime) => { const id = 'img_' + rid(); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
     progress: pay.kind === 'chat' ? async (info) => { // live status for the phone (+ cancel / new messages back)
-      if (!info.shot && !info.agents && Date.now() - lastP < 1500) return null; lastP = Date.now();
-      return await post('/runner/progress', { run: job.run, label: String(info.label || '').slice(0, 80), step: info.step | 0, shot: info.shot || null, agents: info.agents || null });
+      if (!info.shot && !info.agents && !info.intro && Date.now() - lastP < 1500) return null; lastP = Date.now();
+      return await post('/runner/progress', { run: job.run, label: String(info.label || '').slice(0, 80), kind: info.kind || null, intro: info.intro || null, step: info.step | 0, shot: info.shot || null, agents: info.agents || null });
     } : undefined,
   };
   const budgetMs = pay.budgetMs || 320 * 60000; // GitHub job limit is 340 min: hand over to a fresh runner before it
