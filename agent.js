@@ -1,4 +1,4 @@
-// JANUS Cloud agent core (v4): portable (Cloudflare Worker + GitHub runner + Node test harness).
+// JANUS Cloud agent core (v5: parallel sub-agents, shared browser with one tab per agent, extensions): portable (Cloudflare Worker + GitHub runner + Node test harness).
 // ctx = { llm (router), browser() -> puppeteer Browser, logins: {get(site), list()}, images: {put, get}, now(),
 //         optional: runCode, install, fs:{write,read,list}, testWebApp, progress(info) -> {cancel, inbox}, cookies, saveCookies }
 import { makeRouter, firstJsonCall as _fjc, GEMINI_MODELS as _GM } from './router.js';
@@ -27,6 +27,7 @@ export const TOOLS = [
   { name: 'run_code', description: 'Run code on the cloud computer (Linux, Python 3, Node 20, Java 17, Android SDK, Gradle; internet on; pip install --user / npm i allowed; no sudo). Use for builds, tests, data work, image/video editing (Pillow, ffmpeg). Files saved at the TOP LEVEL of the work folder come back to the user as files. Input images are in ./inputs/<image_id>.<ext>.', parameters: { type: 'object', properties: { language: { type: 'string', enum: ['python', 'node', 'bash'] }, code: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['language', 'code'] } },
   { name: 'install_packages', description: 'Install Ubuntu (apt) packages on the cloud computer, e.g. ["ffmpeg","imagemagick"]. pip/npm packages: install them inside run_code instead.', parameters: { type: 'object', properties: { apt: { type: 'array', items: { type: 'string' } } }, required: ['apt'] } },
   { name: 'test_web_app', description: 'SELF-TEST a web app/game you built: opens it in headless Chromium on a phone screen (412x915, touch), presses start, swipes/taps, takes screenshots over ~10 s, records JS errors, alert() calls and how much of the screen the game uses, then a vision reviewer critiques it against the quality checklist. Use after every build and after every fix (at least 2 rounds for games). path = html file in the work folder.', parameters: { type: 'object', properties: { path: { type: 'string' }, focus: { type: 'string', description: 'what to look at this round' } }, required: ['path'] } },
+  { name: 'spawn_agents', description: 'Run up to 10 sub-agents AT THE SAME TIME, each on one independent part of the job (compare 5 shops, research 6 topics, check several sites, gather facts in parallel). Each sub-agent has web_search/read_url and, when browser=true, its own browser tab (max 6 tabs at once; the rest wait for a free tab). They return short summaries; you then merge them into one answer. Use it when the job splits into 2–10 independent parts; do not use it for one simple step. task = complete self-contained instructions for that part.', parameters: { type: 'object', properties: { tasks: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, task: { type: 'string' }, browser: { type: 'boolean' } }, required: ['task'] } } }, required: ['tasks'] } },
   { name: 'finish', description: 'The task is done (or truly impossible). result = the final short answer for the user in their language.', parameters: { type: 'object', properties: { result: { type: 'string' }, success: { type: 'boolean' } }, required: ['result', 'success'] } },
 ];
 const RUNNER_ONLY = ['run_code', 'install_packages', 'write_file', 'read_file', 'test_web_app'];
@@ -78,14 +79,14 @@ export async function readUrl(u) {
 
 const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_image (it is free and returns an image_id). If the task says to make the image on Bing Image Creator, Leonardo, Canva or another generator website, do NOT open that site (it needs a Microsoft/other account and downloads don't work here): silently use generate_image instead, which gives the same kind of image, and continue with the rest of the task. Never fail a task just because of the image site. Pinterest: first open https://www.pinterest.com/login/ and call sign_in (skip if already logged in: the page then redirects away from /login), then open https://www.pinterest.com/pin-creation-tool/ (if it redirects to the home page you are NOT logged in). On that page: upload_image into the "input:file" element (Upload your media; JPG/PNG up to 20MB, MP4 up to 200MB) → wait/list_elements until the image preview shows → type the title into "Tell everyone what your Pin is about" / "Add a title" → type the description into "Describe your Pin" / "Add a detailed description" (it is a text box, click it then type) → optional: link, "Choose a board" → click the red "Publish" button (it appears at the top only after the image is uploaded) → confirm with read_page that Pinterest says it was published / shows the new pin. If a "Save draft"/"Publish" choice appears, choose Publish. Instagram/Facebook/X posting from a browser often needs the app or 2FA; if blocked, finish with the reason.`;
 
-const GOOGLE_TIP = ` Google sign-in: if a site needs a login and its own login is NOT in the saved list but google.com IS, use the site's "Continue with Google" / "Sign in with Google" button, then on accounts.google.com call sign_in (email page, then call sign_in again on the password page). If Google shows "This browser or app may not be secure", a captcha or asks for phone approval, you cannot pass it from the cloud: say so plainly and ask the user to share that site's own email+password login in JANUS → Scheduled → Logins.`;
+const GOOGLE_TIP = ` Google sign-in: if a site needs a login and its own login is NOT in the saved list but google.com IS, use the site's "Continue with Google" / "Sign in with Google" button, then on accounts.google.com call sign_in (email page, then call sign_in again on the password page). If Google shows "This browser or app may not be secure", a captcha or asks for phone approval, you cannot pass it from the cloud: say so plainly and ask the user to share that site's own email+password login in JANUS → Settings → Cloud → Logins.`;
 
 // Hark-level behaviour, shared by chat jobs, scheduled tasks and cloud computer jobs.
 export const CORE_RULES = `HOW YOU WORK
 - Answer first. Short, clear, in the user's language (Hinglish if they write Hinglish). No fluff, no "Great question", no long intros, no step lists unless asked. Use Markdown only when it helps.
 - Plan → act → verify. For any multi-step task make a short plan in your head, do it step by step with tools, and CHECK the result (read the page, run the code, test the app) before you say it is done.
 - Never fake success. Say "done" only when your own steps prove it (page shows it was posted, build produced the file, test passed). If something failed, say exactly what failed and what the user can do.
-- Never promise abilities you do not have, and never promise to do something later unless a schedule exists. Never invent where a setting, code or account lives (the JANUS Cloud pairing code comes from the cloud setup / the developer, not from any website or portal). If unsure, say you are unsure.
+- Never promise abilities you do not have, and never promise to do something later unless a schedule exists. Never invent where a setting, code or account lives. If unsure, say you are unsure.
 - Use the whole step budget on long tasks: keep working until the task is really finished. Never ask the user to say "continue", never stop half-way to report progress.
 - No placeholders: complete production-quality code, real data, every file in full.
 - Security: you never see or ask for passwords, OTP codes, API keys or card numbers. Logins happen only through sign_in (saved logins). Never type secrets yourself, never print them, never put them in files.
@@ -100,7 +101,7 @@ const GAME_PLAYBOOK = `QUALITY PLAYBOOK for web apps & games (follow every point
 - Robust: no console errors, works offline from one index.html (inline CSS/JS) unless the user asked for more files; handle visibilitychange (pause), resize and orientation.`;
 
 const SELFTEST = `SELF-TEST LOOP (mandatory for anything visual you build: games, web apps, pages):
-1) write the files → 2) test_web_app(path) → 3) read the critique + errors + screen-usage numbers → 4) fix every real problem with write_file → 5) test_web_app again. Do at least 2 full polish rounds for a game; keep going while the reviewer finds real problems, but at most 5 rounds — once there are no JS errors and the big issues are fixed, finish. Ignore □ boxes where emoji should be (the test machine has no emoji font; phones show them). If you package it as an Android app (WebView wrapper APK), test the web part first, then build.`;
+1) write the files (ALWAYS in parts of at most 150 lines per write_file call: first part normally, the rest with append=true — long single calls get cut off) → 2) test_web_app(path) → 3) read the critique + errors + screen-usage numbers → 4) fix every real problem with write_file → 5) test_web_app again. Do at least 2 full polish rounds for a game; keep going while the reviewer finds real problems, but at most 5 rounds — once there are no JS errors and the big issues are fixed, finish. Ignore □ boxes where emoji should be (the test machine has no emoji font; phones show them). If you package it as an Android app (WebView wrapper APK), test the web part first, then build.`;
 
 const JOB_TIPS = `CLOUD COMPUTER: you have a full Ubuntu machine: write_file/read_file, run_code (bash/python/node, up to ~50 min per call), install_packages (apt), internet, Java 17 (JAVA_HOME), Android SDK (ANDROID_HOME, platforms + build-tools), Gradle, Python 3, Node 20, headless Chromium (test_web_app). Work like a senior engineer: plan, write files, run, read errors, fix, repeat until it truly works.
 - Android app: complete Gradle project (AGP + Gradle wrapper or a pinned distribution), ./gradlew assembleDebug --no-daemon, then COPY the .apk to the TOP LEVEL of the work folder (cp app/build/outputs/apk/debug/app-debug.apk ./MyApp.apk). For a game, a WebView wrapper around your tested index.html (fullscreen, portrait, immersive) is fine and fast.
@@ -118,50 +119,30 @@ function sysPrompt(task, nowIso, loginSites, opts) {
   return `${mode}
 Now: ${nowIso} (user timezone Asia/Kolkata).
 ${CORE_RULES}
-TOOLS: web_search/read_url for facts (cite sources as [1] with URLs when you use them); the cloud browser (open_url, list_elements, click/type by element number, look_at_screen to check); sign_in for login forms; generate_image for pictures.
-Saved logins you can use with sign_in: ${lg}. If the task needs a site whose login is not in this list (and Google is not usable for it), do not guess: say exactly "<site> ka login cloud mein share nahi hai. JANUS → Scheduled → Logins mein Share dabao." Saved browser cookies may already keep you logged in, so open the site first and check.
+TOOLS: web_search/read_url for facts (cite sources as [1] with URLs when you use them); the cloud browser (open_url, list_elements, click/type by element number, look_at_screen to check); sign_in for login forms; generate_image for pictures; spawn_agents to run up to 10 sub-agents in parallel when the job splits into independent parts (research many items, compare shops/sites), then merge their summaries.
+Saved logins you can use with sign_in: ${lg}. If the task needs a site whose login is not in this list (and Google is not usable for it), do not guess: say exactly "<site> ka login cloud mein share nahi hai. JANUS → Settings → Cloud → Logins mein Share dabao." Saved browser cookies may already keep you logged in, so open the site first and check.
 If a site needs an OTP/captcha/approval you cannot do, stop and say what is needed.
 ${opts.chat ? 'When done, reply with the final answer as plain text (or call finish). Keep it short: the result, plus files/links if any.' : 'Never stop silently: every reply must call a tool, and the last one must be finish(result) in the user\'s language.'}
 ${SITE_TIPS}${GOOGLE_TIP}${opts.job || opts.chat ? '\n' + JOB_TIPS : ''}${isBuild(task) ? '\n' + GAME_PLAYBOOK + '\n' + SELFTEST : ''}
 ${opts.chat ? '' : 'TASK: ' + task}`;
 }
 
-export async function runAgent(ctx, task, opts = {}) {
-  const maxSteps = opts.maxSteps || 25;
-  const steps = []; const images = []; const files = [];
-  let browser = null, page = null;
-  const getPage = async () => {
-    if (page) return page;
-    browser = await ctx.browser();
-    page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36');
-    if (ctx.cookies && ctx.cookies.length) { try { const c = await page.createCDPSession(); await c.send('Network.setCookies', { cookies: ctx.cookies }); } catch { } }
-    return page;
-  };
-  const el = async (id) => { const p = await getPage(); const h = await p.$(`[data-jn="${id}"]`); if (!h) throw new Error('element ' + id + ' not found; call list_elements'); return h; };
-  const settle = async (p) => { try { await p.waitForNetworkIdle({ idleTime: 500, timeout: 6000 }); } catch { } };
 
-  const impl = {
-    web_search: async ({ query }) => S(await webSearch(query)),
-    read_url: async ({ url }) => await readUrl(url),
-    generate_image: async ({ prompt }) => {
-      let b = null, mime = 'image/jpeg';
-      for (const g of [ctx.genImage, ctx.genImage2]) { if (b || !g) continue; try { const o = await g(prompt); if (o && o.bytes && o.bytes.length > 2000) { b = o.bytes; mime = o.mime; } } catch (e) { } }
-      if (!b) {
-        const pl = prompt.toLowerCase(); const [w, h] = /pin|pinterest|wallpaper|portrait|vertical|story|reel|9:16|poster|phone/.test(pl) ? [1024, 1536] : /landscape|wide|banner|16:9|desktop|youtube|thumbnail/.test(pl) ? [1536, 864] : [1024, 1024];
-        let r;
-        for (let k = 0; k < 3; k++) {
-          r = await fetch('https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt.slice(0, 900)) + '?width=' + w + '&height=' + h + '&nologo=true&enhance=true&seed=' + Math.floor(Math.random() * 1e6));
-          if (r.ok) break;
-          const t = await r.text().catch(() => ''); const wait = +((/Retry after (\d+)s/.exec(t) || [])[1] || 0);
-          if (!(r.status === 402 || r.status === 429) || k === 2) throw new Error('image service busy (' + r.status + '), try generate_image again in a minute');
-          await new Promise(z => setTimeout(z, Math.min(Math.max(wait, 5), 60) * 1000 + 1000));
-        }
-        b = new Uint8Array(await r.arrayBuffer()); mime = r.headers.get('content-type') || 'image/jpeg';
-      }
-      const id = await ctx.images.put(b, mime); images.push(id); return S({ image_id: id, bytes: b.length });
-    },
+/** Shared cloud browser: one Chromium per job, one page (tab) per agent. Extensions (userscripts) run on every page. */
+export async function sharedBrowser(ctx) { if (!ctx._browser) ctx._browser = Promise.resolve(ctx.browser()); return ctx._browser; }
+export async function newPage(ctx) {
+  const b = await sharedBrowser(ctx); const page = await b.newPage();
+  await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36');
+  if (ctx.cookies && ctx.cookies.length && !ctx._cookiesSet) { ctx._cookiesSet = true; try { const c = await page.createCDPSession(); await c.send('Network.setCookies', { cookies: ctx.cookies }); } catch { } }
+  for (const e of ctx.extensions || []) { if (e && e.enabled !== false && e.code) { try { await page.evaluateOnNewDocument(e.code); } catch { } } }
+  return page;
+}
+const settle = async (p) => { try { await p.waitForNetworkIdle({ idleTime: 500, timeout: 6000 }); } catch { } };
+/** Browser tools bound to one page (main agent and every sub-agent get their own). info = {task, step()} */
+export function pageTools(ctx, getPage, info) {
+  const el = async (id) => { const p = await getPage(); const h = await p.$(`[data-jn="${id}"]`); if (!h) throw new Error('element ' + id + ' not found; call list_elements'); return h; };
+  return {
     open_url: async ({ url }) => { const p = await getPage(); await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }); await settle(p); return 'Title: ' + (await p.title()) + '\nURL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
     list_elements: async () => { const p = await getPage(); return 'URL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
     click_element: async ({ element_id }) => { const h = await el(element_id); const p = await getPage(); await h.evaluate(e => e.scrollIntoView({ block: 'center' })); await h.click(); await settle(p); return 'clicked. URL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
@@ -177,7 +158,7 @@ export async function runAgent(ctx, task, opts = {}) {
     read_page: async () => { const p = await getPage(); return clip(await p.evaluate(() => document.body.innerText), 6000); },
     sign_in: async () => {
       const p = await getPage(); const site = siteKey(p.url()); const cred = await ctx.logins.get(site);
-      if (!cred) return 'No saved login for ' + site + '. Ask the user (in finish) to add it in JANUS → Cloud tasks → Logins.';
+      if (!cred) return 'No saved login for ' + site + '. Ask the user (in finish) to add it in JANUS → Settings → Cloud → Logins.';
       const r = await p.evaluate((u, pw) => {
         const vis = e => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
         const set = (e, v) => { const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'); e.focus(); d.set.call(e, v); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); };
@@ -216,23 +197,11 @@ export async function runAgent(ctx, task, opts = {}) {
       }); } catch { await new Promise(z => setTimeout(z, 2000)); } }
       if (!st) return 'Login submitted but the page kept reloading. Call list_elements to check if you are logged in.';
       const onLogin = /log.?in|sign.?in|signin|auth/i.test(new URL(st.url).pathname);
-      if (st.otp && !st.pw) return 'LOGIN NEEDS A CODE on ' + site + ': the site asks for a verification code (sent to the user\'s email/phone). You cannot get it. finish(success=false, "' + site + ' ne verification code maanga. Phone pe ek baar ' + site + ' mein login karke approve karo, phir JANUS → Scheduled → Run dabao").';
-      if (st.err && (st.pw || onLogin)) return 'LOGIN FAILED on ' + site + ': page says "' + st.err + '". Do not retry more than once. If it is about password/email → finish(success=false, "' + site + ' ka saved password galat hai, JANUS → Scheduled → Logins mein sahi login dobara Share karo"). If it is a code/captcha/verification → finish(success=false) asking the user to log in once on their phone and approve.';
+      if (st.otp && !st.pw) return 'LOGIN NEEDS A CODE on ' + site + ': the site asks for a verification code (sent to the user\'s email/phone). You cannot get it. finish(success=false, "' + site + ' ne verification code maanga. Phone pe ek baar ' + site + ' mein login karke approve karo, phir JANUS → Settings → Scheduled → Run now dabao").';
+      if (st.err && (st.pw || onLogin)) return 'LOGIN FAILED on ' + site + ': page says "' + st.err + '". Do not retry more than once. If it is about password/email → finish(success=false, "' + site + ' ka saved password galat hai, JANUS → Settings → Cloud → Logins mein sahi login dobara Share karo"). If it is a code/captcha/verification → finish(success=false) asking the user to log in once on their phone and approve.';
       if (st.pw && /password/.test(r) ) return 'LOGIN NOT CONFIRMED: still on a page with a password box (' + st.url + '). Call look_at_screen to see why (error, captcha, extra step).';
       if (st.pw && !/password/.test(r)) return 'Filled ' + r + ' and pressed ' + (how || 'Enter') + '. Now a password page is shown: call sign_in again.';
       return 'LOGIN OK: ' + site + ' accepted the sign-in. Now on: ' + st.url + (st.url === before ? ' (same URL; verify with list_elements that you are logged in)' : '');
-    },
-    run_code: async ({ language, code, timeout_sec }) => {
-      if (!ctx.runCode) return 'run_code is not available on this runner (only on the GitHub runner).';
-      const r = await ctx.runCode(language, String(code || ''), Math.min(Math.max(+timeout_sec || 120, 10), ctx.maxCodeSecs || 600), images);
-      for (const f of r.files || []) { if (f.mime.startsWith('image/')) images.push(f.id); else files.push(f.id); }
-      return 'exit ' + r.code + '\n' + clip(r.out || '', 5000) + (r.files && r.files.length ? '\nFILES: ' + r.files.map(f => f.name + ' → ' + f.id + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
-    },
-    install_packages: async ({ apt }) => {
-      if (!ctx.install) return 'Installing packages is only possible on the GitHub runner.';
-      const names = (Array.isArray(apt) ? apt : [apt]).map(String).filter(n => /^[a-z0-9][a-z0-9+.\-]{0,80}$/.test(n)).slice(0, 30);
-      if (!names.length) return 'No valid package names.';
-      return await ctx.install(names);
     },
     upload_image: async ({ element_id, image_id }) => {
       const img = await ctx.images.get(image_id); if (!img) throw new Error('unknown image_id');
@@ -248,6 +217,117 @@ export async function runAgent(ctx, task, opts = {}) {
       const p = await getPage(); await settle(p); await new Promise(z => setTimeout(z, 2500));
       return 'image put into the page via ' + ok + '. Check the page shows the image now (if not, try another file input or look_at_screen):\n' + (await p.evaluate(MARK_JS));
     },
+    look_at_screen: async ({ question }) => {
+      const p = await getPage(); const b64 = await p.screenshot({ type: 'jpeg', quality: 60, encoding: 'base64' });
+      if (ctx.progress) { try { await ctx.progress({ label: 'Looking at the page', step: info.step(), shot: b64 }); } catch { } }
+      try { // every brain can "see": the vision route turns the screenshot into precise text
+        const r = await ctx.llm([{ role: 'user', parts: [{ text: 'You are the eyes of a web agent. Task: ' + clip(info.task, 600) + '\n' + (question ? 'Question: ' + question + '\n' : '') + 'Describe this screenshot precisely: page/site, main headings, visible buttons and fields (with their labels), messages/errors/popups, whether the user looks logged in, and anything blocking (captcha, cookie banner, login wall). Max 180 words.' }, { inlineData: { mimeType: 'image/jpeg', data: b64 } }] }], [], { route: 'vision', timeoutMs: 90000 });
+        return 'SCREEN (' + p.url() + '): ' + (r.parts || []).map(x => x.text || '').join('').trim();
+      } catch (e) { return 'Screenshot taken but could not be described (' + clip(String(e.message), 80) + '). Use read_page / list_elements instead.\nURL: ' + p.url(); }
+    },
+  };
+}
+
+// ---------------- Parallel sub-agents (orchestrator) ----------------
+export const SUB_MAX = 10, SUB_PAGES = 6;
+const SUB_TOOLS = ['web_search', 'read_url', 'open_url', 'list_elements', 'click_element', 'type_into', 'select_option', 'scroll_page', 'read_page', 'look_at_screen', 'sign_in', 'finish'];
+const subLabel = (n, a) => ({ web_search: 'Searching “' + clip(a.query || '', 36) + '”', read_url: 'Reading ' + host(a.url), open_url: 'Opening ' + host(a.url), list_elements: 'Reading the page', click_element: 'Clicking', type_into: 'Typing', select_option: 'Choosing', scroll_page: 'Scrolling', read_page: 'Reading the page', look_at_screen: 'Looking', sign_in: 'Signing in' })[n] || 'Working';
+/** list = [{title, task, browser}] → runs all at once (≤10), each with its own tool loop and (if needed) its own page. */
+export async function runSubAgents(ctx, list, parent = {}) {
+  const items = (Array.isArray(list) ? list : []).filter(x => x && (x.task || x.title)).slice(0, SUB_MAX);
+  if (!items.length) return 'No sub-tasks given. Pass tasks: [{title, task}].';
+  const state = items.map(x => ({ t: clip(String(x.title || x.task), 48), s: 'queued', l: '' }));
+  let free = ctx.browser ? (ctx.subPages || SUB_PAGES) : 0, cancelled = false; const waiters = [];
+  const acquire = async () => { while (free <= 0) await new Promise(r => waiters.push(r)); free--; };
+  const release = () => { free++; const w = waiters.shift(); if (w) w(); };
+  let lastPush = 0;
+  const push = async (force) => {
+    if (!parent.progress || (!force && Date.now() - lastPush < 1500)) return; lastPush = Date.now();
+    const done = state.filter(s => s.s === 'done' || s.s === 'fail').length;
+    const r = await parent.progress({ label: items.length + ' agents working · ' + done + ' done', step: parent.step ? parent.step() : 0, agents: state });
+    if (r && r.cancel) cancelled = true;
+  };
+  const one = async (x, i) => {
+    const task = String(x.task || x.title);
+    const wantsBrowser = x.browser === true || (x.browser !== false && /https?:\/\/|website|\bsite\b|\bopen\b|log ?in|sign ?in|\bbook\b|\bfill\b|\bclick\b|browser|kholo/i.test(task));
+    let page = null, gotPage = false;
+    if (wantsBrowser && ctx.browser) { state[i].l = 'waiting for a free browser tab'; await push(); await acquire(); gotPage = true; }
+    state[i].s = 'run'; state[i].l = 'starting'; await push();
+    const getPage = async () => { if (!page) page = await newPage(ctx); return page; };
+    const tools = TOOLS.filter(t => SUB_TOOLS.includes(t.name) && (gotPage || !BROWSER.includes(t.name)));
+    const impl = { web_search: async ({ query }) => S(await webSearch(query)), read_url: async ({ url }) => await readUrl(url), ...(gotPage ? pageTools(ctx, getPage, { task, step: () => 0 }) : {}) };
+    const system = `You are sub-agent ${i + 1} of ${items.length}, working for JANUS on ONE part of a bigger job. Do only your part, quickly: use tools, then call finish(result, success) with a compact factual summary (max 12 lines; include the URLs, prices and numbers you found). Nobody can answer questions. Never type passwords (logins only via sign_in). Answer in the language of the task.\nPARENT JOB (context only): ${clip(String(parent.task || ''), 600)}\nYOUR PART: ${task}`;
+    const contents = [{ role: 'user', parts: [{ text: 'Do your part now.' }] }];
+    let result = null;
+    try {
+      for (let k = 0; k < (x.steps || 14) && !result; k++) {
+        if (cancelled) { result = { ok: false, result: 'Stopped.' }; break; }
+        const r = await ctx.llm(contents, tools, { route: gotPage ? 'main' : 'fast', system, timeoutMs: 240000, spread: i + 1, maxTokens: 4096 });
+        const parts = (r.parts || []).filter(p => p.text || p.functionCall); if (!parts.length) parts.push({ text: '' });
+        contents.push({ role: 'model', parts });
+        const calls = parts.filter(p => p.functionCall);
+        if (!calls.length) { const t = parts.map(p => p.text || '').join('').trim(); if (t) { result = { ok: true, result: t }; break; } contents.push({ role: 'user', parts: [{ text: 'Call a tool, or finish(result).' }] }); continue; }
+        const outs = [];
+        for (const c of calls) {
+          const { name, args = {} } = c.functionCall;
+          if (name === 'finish') { result = { ok: args.success !== false, result: String(args.result || '') }; break; }
+          state[i].l = subLabel(name, args); await push();
+          let out; try { const f = impl[name]; if (!f) throw new Error('this tool is not available to sub-agents'); out = await f(args); if (out && typeof out === 'object') out = out.text; } catch (e) { out = 'ERROR: ' + (e && e.message || e); }
+          outs.push({ functionResponse: { name, response: { result: clip(String(out), 6000) } } });
+        }
+        if (!result && outs.length) contents.push({ role: 'user', parts: outs });
+        if (contents.length > 24) for (const c of contents.slice(1, -8)) c.parts = (c.parts || []).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response.result || ''), 500) } } } : p);
+      }
+      if (!result) result = { ok: false, result: 'Step limit reached before finishing.' };
+    } catch (e) { result = { ok: false, result: 'Failed: ' + clip(String(e && e.message || e), 160) }; }
+    finally { if (page) { try { await page.close(); } catch { } } if (gotPage) release(); }
+    state[i].s = result.ok ? 'done' : 'fail'; state[i].l = clip(String(result.result || '').replace(/\s+/g, ' '), 90); await push(true);
+    return { title: state[i].t, ok: result.ok, result: clip(String(result.result || ''), 2000) };
+  };
+  const out = await Promise.all(items.map(one));
+  return S({ agents: out, note: 'All sub-agents finished. Merge their results into one clear answer (or continue the job with them).' });
+}
+
+export async function runAgent(ctx, task, opts = {}) {
+  const maxSteps = opts.maxSteps || 25;
+  const steps = []; const images = []; const files = [];
+  let page = null;
+  const getPage = async () => { if (!page) page = await newPage(ctx); return page; };
+
+  const impl = {
+    web_search: async ({ query }) => S(await webSearch(query)),
+    read_url: async ({ url }) => await readUrl(url),
+    generate_image: async ({ prompt }) => {
+      let b = null, mime = 'image/jpeg';
+      for (const g of [ctx.genImage, ctx.genImage2]) { if (b || !g) continue; try { const o = await g(prompt); if (o && o.bytes && o.bytes.length > 2000) { b = o.bytes; mime = o.mime; } } catch (e) { } }
+      if (!b) {
+        const pl = prompt.toLowerCase(); const [w, h] = /pin|pinterest|wallpaper|portrait|vertical|story|reel|9:16|poster|phone/.test(pl) ? [1024, 1536] : /landscape|wide|banner|16:9|desktop|youtube|thumbnail/.test(pl) ? [1536, 864] : [1024, 1024];
+        let r;
+        for (let k = 0; k < 3; k++) {
+          r = await fetch('https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt.slice(0, 900)) + '?width=' + w + '&height=' + h + '&nologo=true&enhance=true&seed=' + Math.floor(Math.random() * 1e6));
+          if (r.ok) break;
+          const t = await r.text().catch(() => ''); const wait = +((/Retry after (\d+)s/.exec(t) || [])[1] || 0);
+          if (!(r.status === 402 || r.status === 429) || k === 2) throw new Error('image service busy (' + r.status + '), try generate_image again in a minute');
+          await new Promise(z => setTimeout(z, Math.min(Math.max(wait, 5), 60) * 1000 + 1000));
+        }
+        b = new Uint8Array(await r.arrayBuffer()); mime = r.headers.get('content-type') || 'image/jpeg';
+      }
+      const id = await ctx.images.put(b, mime); images.push(id); return S({ image_id: id, bytes: b.length });
+    },
+    ...pageTools(ctx, getPage, { task, step: () => stepNo }),
+    spawn_agents: async ({ tasks }) => { await progress({ label: 'Starting ' + Math.min((tasks || []).length, SUB_MAX) + ' agents', step: stepNo }); return runSubAgents(ctx, tasks, { task, progress, step: () => stepNo }); },
+    run_code: async ({ language, code, timeout_sec }) => {
+      if (!ctx.runCode) return 'run_code is not available on this runner (only on the GitHub runner).';
+      const r = await ctx.runCode(language, String(code || ''), Math.min(Math.max(+timeout_sec || 120, 10), ctx.maxCodeSecs || 600), images);
+      for (const f of r.files || []) { if (f.mime.startsWith('image/')) images.push(f.id); else files.push(f.id); }
+      return 'exit ' + r.code + '\n' + clip(r.out || '', 5000) + (r.files && r.files.length ? '\nFILES: ' + r.files.map(f => f.name + ' → ' + f.id + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
+    },
+    install_packages: async ({ apt }) => {
+      if (!ctx.install) return 'Installing packages is only possible on the GitHub runner.';
+      const names = (Array.isArray(apt) ? apt : [apt]).map(String).filter(n => /^[a-z0-9][a-z0-9+.\-]{0,80}$/.test(n)).slice(0, 30);
+      if (!names.length) return 'No valid package names.';
+      return await ctx.install(names);
+    },
     write_file: async ({ path, content, append }) => { if (!ctx.fs) return 'write_file is only available on the cloud computer.'; const r = await ctx.fs.write(String(path || ''), String(content ?? ''), !!append); if (r.file) files.push(r.file.id); return r.msg; },
     read_file: async ({ path }) => { if (!ctx.fs) return 'read_file is only available on the cloud computer.'; return clip(await ctx.fs.read(String(path || '')), 20000); },
     test_web_app: async ({ path, focus }) => {
@@ -258,17 +338,9 @@ export async function runAgent(ctx, task, opts = {}) {
       if (r.shotB64 && ctx.progress) { try { await ctx.progress({ label: 'Testing on a phone screen', step: stepNo, shot: r.shotB64 }); } catch { } }
       return r.text;
     },
-    look_at_screen: async ({ question }) => {
-      const p = await getPage(); const b64 = await p.screenshot({ type: 'jpeg', quality: 60, encoding: 'base64' });
-      if (ctx.progress) { try { await ctx.progress({ label: 'Looking at the page', step: stepNo, shot: b64 }); } catch { } }
-      try { // every brain can "see": the vision route turns the screenshot into precise text
-        const r = await ctx.llm([{ role: 'user', parts: [{ text: 'You are the eyes of a web agent. Task: ' + clip(task, 600) + '\n' + (question ? 'Question: ' + question + '\n' : '') + 'Describe this screenshot precisely: page/site, main headings, visible buttons and fields (with their labels), messages/errors/popups, whether the user looks logged in, and anything blocking (captcha, cookie banner, login wall). Max 180 words.' }, { inlineData: { mimeType: 'image/jpeg', data: b64 } }] }], [], { route: 'vision', timeoutMs: 90000 });
-        return 'SCREEN (' + p.url() + '): ' + (r.parts || []).map(x => x.text || '').join('').trim();
-      } catch (e) { return 'Screenshot taken but could not be described (' + clip(String(e.message), 80) + '). Use read_page / list_elements instead.\nURL: ' + p.url(); }
-    },
   };
 
-  const label = (name, a) => ({ web_search: 'Searching “' + clip(a.query || '', 40) + '”', read_url: 'Reading ' + host(a.url), generate_image: 'Creating an image', open_url: 'Opening ' + host(a.url), list_elements: 'Reading the page', click_element: 'Clicking', type_into: 'Typing', select_option: 'Choosing an option', scroll_page: 'Scrolling', read_page: 'Reading the page', look_at_screen: 'Looking at the page', sign_in: 'Signing in', upload_image: 'Uploading', write_file: 'Writing ' + clip(String(a.path || 'a file'), 40), read_file: 'Reading ' + clip(String(a.path || 'a file'), 40), run_code: 'Running code', install_packages: 'Installing tools', test_web_app: 'Testing on a phone screen', finish: 'Checking the result' })[name] || 'Working';
+  const label = (name, a) => ({ web_search: 'Searching “' + clip(a.query || '', 40) + '”', read_url: 'Reading ' + host(a.url), generate_image: 'Creating an image', open_url: 'Opening ' + host(a.url), list_elements: 'Reading the page', click_element: 'Clicking', type_into: 'Typing', select_option: 'Choosing an option', scroll_page: 'Scrolling', read_page: 'Reading the page', look_at_screen: 'Looking at the page', sign_in: 'Signing in', upload_image: 'Uploading', write_file: 'Writing ' + clip(String(a.path || 'a file'), 40), read_file: 'Reading ' + clip(String(a.path || 'a file'), 40), spawn_agents: 'Starting parallel agents', run_code: 'Running code', install_packages: 'Installing tools', test_web_app: 'Testing on a phone screen', finish: 'Checking the result' })[name] || 'Working';
   const t0 = ctx.now(); let stepNo = opts.state ? (opts.state.stepNo || 0) : 0; let lastShot = null; const tests = []; let lastShotAt = 0;
   const progress = async (info) => { if (!ctx.progress) return null; try { return await ctx.progress(info); } catch { return null; } };
   const loginSites = ctx.logins.list ? await ctx.logins.list() : [];
@@ -351,7 +423,7 @@ export async function runAgent(ctx, task, opts = {}) {
     }
   } finally {
     if (page && ctx.saveCookies) { try { const c = await page.createCDPSession(); const { cookies } = await c.send('Network.getAllCookies'); await ctx.saveCookies(cookies); } catch { } }
-    try { if (browser) await browser.close(); } catch { }
+    try { if (ctx._browser && !opts.keepBrowser) { const b = await ctx._browser; ctx._browser = null; await b.close(); } } catch { }
   }
   if (cont) return { cont: { contents: contents.map(c => ({ role: c.role, parts: (c.parts || []).filter(p => !p.inlineData) })).map(c => c.parts.length ? c : { role: c.role, parts: [{ text: '…' }] }), stepNo, steps: steps.slice(-60), images: images.slice(-6), files: files.slice(-8) }, success: false, result: '', steps, images, files: files.slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
   if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Last steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
