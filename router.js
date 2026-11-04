@@ -8,29 +8,38 @@
 // Contents use the Gemini shape: [{role:'user'|'model', parts:[{text}|{functionCall}|{functionResponse}|{inlineData}]}].
 
 export const GEMINI = {
-  main: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3-flash-preview'],
+  main: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'],
+  agent: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'],
+  research: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'],
+  long: ['gemini-3.8-flash', 'gemini-3.6-flash'],
   code: ['gemini-3.8-flash', 'gemini-3.6-flash'],
   vision: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'],
   fast: ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'],
 };
 export const GEMINI_MODELS = [...new Set([...GEMINI.main, ...GEMINI.fast, 'gemma-4-26b-a4b-it'])];
 
-/** id, base, key ('none' = keyless), rpm / tpm / gapMs / inflight limits, maxIn = max request size in tokens,
+/** v5.1 roles: fast (chat/quick), main, code, agent (browser/tool use), vision, research, long (long context).
+ *  Strongest first; ids checked live 2026-11-04 (NVIDIA: Kimi K2.6 + Nemotron 3 Super 404 on this key, DeepSeek V4.1 /
+ *  GLM-5.3 hung → kept late; Step-5 preview + Mistral Large 4 answer tool calls in ~1 s).
+ *  id, base, key ('none' = keyless), rpm / tpm / gapMs / inflight limits, maxIn = max request size in tokens,
  *  models[role] = ordered model ids (verified against the provider's live /models when a key exists). */
+const NV_TOP = ['nvidia/nemotron-3-ultra-550b-a55b', 'stepfun-ai/step-5-preview', 'mistralai/mistral-large-4-1t-a52b', 'deepseek-ai/deepseek-v4.1-flash'];
 export const PROVIDERS = [
   { id: 'gemini', kind: 'gemini', rpm: 10, inflight: 4 },
   { id: 'nvidia', base: 'https://integrate.api.nvidia.com/v1', rpm: 38, inflight: 8, models: {
-    main: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash', 'moonshotai/kimi-k2.6', 'minimaxai/minimax-m3.1-flash'],
-    code: ['deepseek-ai/deepseek-v4.1-flash', 'nvidia/nemotron-3-ultra-550b-a55b', 'moonshotai/kimi-k2.6'],
-    vision: ['nvidia/nemotron-3.5-super-vl-120b-a12b', 'google/gemma-4-31b-it'],
-    fast: ['nvidia/nemotron-3.5-lightning-30b-a3b', 'minimaxai/minimax-m3.1-flash', 'nvidia/nemotron-3-super-120b-a12b'] } },
+    main: NV_TOP, agent: NV_TOP,
+    research: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash', 'mistralai/mistral-large-4-1t-a52b', 'stepfun-ai/step-5-preview'],
+    long: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash'],
+    code: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash', 'mistralai/mistral-large-4-1t-a52b', 'stepfun-ai/step-5-preview'],
+    vision: ['stepfun-ai/step-5-preview', 'nvidia/nemotron-3.5-super-vl-120b-a12b', 'google/gemma-4-31b-it'],
+    fast: ['nvidia/nemotron-3.5-lightning-30b-a3b', 'minimaxai/minimax-m3.1-flash'] } },
   { id: 'groq', base: 'https://api.groq.com/openai/v1', rpm: 28, tpm: 7600, maxIn: 5500, inflight: 4, models: { // 8K TPM: short jobs only
-    fast: ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b'], code: ['openai/gpt-oss-120b'], main: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'] } },
+    fast: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'], code: ['openai/gpt-oss-120b'], main: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'], agent: ['openai/gpt-oss-120b'], research: ['openai/gpt-oss-120b'] } },
   { id: 'openrouter', base: 'https://openrouter.ai/api/v1', rpm: 18, inflight: 3, models: {
-    main: ['nvidia/nemotron-3-ultra-550b-a55b:free'], code: ['cohere/north-mini-code:free', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+    main: ['nvidia/nemotron-3-ultra-550b-a55b:free'], code: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'cohere/north-mini-code:free'],
     vision: ['nvidia/nemotron-3.5-super-vl:free', 'google/gemma-4-31b-it:free'], fast: ['nvidia/nemotron-3.5-lightning:free'] } },
   { id: 'mistral', base: 'https://api.mistral.ai/v1', rpm: 50, gapMs: 1100, inflight: 1, models: {
-    code: ['codestral-latest', 'mistral-code-latest'], main: ['mistral-medium-latest'], fast: ['mistral-small-latest'], vision: ['mistral-medium-latest'] } },
+    code: ['codestral-latest', 'mistral-large-4'], main: ['mistral-large-4', 'mistral-medium-latest'], fast: ['mistral-small-latest'], vision: ['mistral-medium-latest'], long: ['mistral-large-4'] } },
   { id: 'zai', base: 'https://api.z.ai/api/paas/v4', rpm: 20, inflight: 2, models: { vision: ['glm-4.6v-flash'], fast: ['glm-4.7-flash', 'glm-4.5-flash'], main: ['glm-4.7-flash'] } },
   { id: 'cfai', base: 'https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1', rpm: 60, inflight: 3, models: { // 10k neurons/day
     main: ['@cf/openai/gpt-oss-120b'], code: ['@cf/qwen/qwen3.8-27b', '@cf/openai/gpt-oss-120b'], fast: ['@cf/zai-org/glm-4.7-flash', '@cf/openai/gpt-oss-20b'], vision: ['@cf/meta/llama-4-scout-17b-16e-instruct'] } },
@@ -38,19 +47,36 @@ export const PROVIDERS = [
   { id: 'llm7', base: 'https://api.llm7.io/v1', rpm: 55, gapMs: 1050, inflight: 1, models: { code: ['codestral-latest'], fast: ['mistral-Nemo-Instruct-2407'] } },
   { id: 'sambanova', base: 'https://api.sambanova.ai/v1', rpm: 18, inflight: 2, models: { main: ['DeepSeek-V3.1'], code: ['gpt-oss-120b'] } }, // 20 req/day: last resort
   { id: 'kilo', base: 'https://api.kilo.ai/api/gateway', key: 'none', rpm: 3, inflight: 2, models: { // keyless, ~200 req/hour per IP
-    main: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'kilo-auto/free'], code: ['cohere/north-mini-code:free', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+    main: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'kilo-auto/free'], code: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'cohere/north-mini-code:free'],
     vision: ['nvidia/nemotron-3.5-super-vl:free'], fast: ['nvidia/nemotron-3.5-lightning:free', 'kilo-auto/free'] } },
   { id: 'cerebras', base: 'https://api.cerebras.ai/v1', rpm: 5, inflight: 1, models: { main: ['gpt-oss-120b'], code: ['gpt-oss-120b'], fast: ['gpt-oss-120b'] } }, // trial credit only now
 ];
+// roles a provider does not list use its main models (Groq never gets long-context work: 8K TPM)
+PROVIDERS.forEach(p => { if (!p.models) return; for (const r of ['agent', 'research', 'long']) if (!p.models[r] && p.models.main && !(r === 'long' && p.maxIn)) p.models[r] = p.models.main; });
 /** Provider order per role (custom providers are inserted before the keyless/trial tail). */
 export const ROLE_ORDER = {
-  main: ['gemini', 'nvidia', 'openrouter', 'groq', 'zai', 'mistral', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
-  code: ['nvidia', 'groq', 'mistral', 'openrouter', 'gemini', 'llm7', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
-  vision: ['gemini', 'zai', 'nvidia', 'openrouter', 'hetzner', 'mistral', 'cfai', '*custom', 'kilo'],
-  fast: ['groq', 'gemini', 'zai', 'nvidia', 'cfai', 'mistral', 'openrouter', 'llm7', '*custom', 'kilo', 'cerebras'],
+  fast: ['groq', 'gemini', 'nvidia', 'zai', 'cfai', 'mistral', 'openrouter', 'llm7', '*custom', 'kilo', 'cerebras'],
+  main: ['gemini', 'nvidia', 'mistral', 'groq', 'openrouter', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
+  code: ['nvidia', 'mistral', 'gemini', 'groq', 'openrouter', 'llm7', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
+  agent: ['gemini', 'nvidia', 'mistral', 'groq', 'openrouter', 'zai', 'cfai', '*custom', 'kilo'],
+  vision: ['gemini', 'nvidia', 'zai', 'openrouter', 'mistral', 'hetzner', 'cfai', '*custom', 'kilo'],
+  research: ['gemini', 'nvidia', 'mistral', 'openrouter', 'groq', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova'],
+  long: ['gemini', 'nvidia', 'openrouter', 'mistral', '*custom', 'kilo'],
 };
+export const ROLES = Object.keys(ROLE_ORDER);
+/** Task → role (same rules as the phone's classifyTask). */
+export function classifyTask(text, { images = false, tokens = 0, build = false } = {}) {
+  const t = String(text || '').toLowerCase();
+  if (images) return 'vision';
+  if (tokens > 60000) return 'long';
+  if (build || /\b(code|coding|program|script|function|debug|bug|refactor|html|css|javascript|python|java|kotlin|sql|regex|api|algorithm|apk|app banao|game banao|build (an?|the|me)|android app)\b/.test(t)) return 'code';
+  if (/\b(deep research|research|in[- ]depth|report on|compare|comparison|versus|vs\.?|pros and cons|analy[sz]e|analysis|tulna|review of)\b/.test(t)) return 'research';
+  if (/https?:\/\/|www\.|\b[\w-]+\.(com|in|org|net|io|co|ai|app|dev)\b|\b(website|browser|log ?in|sign ?in|kholo|khol ?ke|add to cart|checkout|book|fill|download|open)\b/.test(t)) return 'agent';
+  if (t.length < 80 && !/\?|kya|what|how|why|kaise|kyun/.test(t)) return 'fast';
+  return 'main';
+}
 export const PROVIDER_IDS = PROVIDERS.map(p => p.id);
-const VISION_OK = /gemma-4|vl|vision|kimi-k2\.6|glm-4\.6v|llama-4-scout|qwen3\.8|mistral-medium/i;
+const VISION_OK = /gemma-4|vl|vision|kimi-k2\.6|glm-4\.6v|llama-4-scout|qwen3\.8|mistral-medium|step-5/i;
 
 const S = (o) => JSON.stringify(o);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -143,7 +169,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
   const live = {};        // provider → Set(live model ids) | null (unknown)
   let last = null, cutSeen = false;
   const custom = (Array.isArray(keys.custom) ? keys.custom : []).filter(c => c && /^https:\/\//.test(c.base || '') && /^[a-z0-9_-]{2,30}$/.test(c.id || '')).map(c => {
-    const ms = Array.isArray(c.models) ? c.models.filter(Boolean) : null; const roles = c.roles && c.roles.length ? c.roles : ['main', 'code', 'fast'];
+    const ms = Array.isArray(c.models) ? c.models.filter(Boolean) : null; const roles = c.roles && c.roles.length ? c.roles : ['main', 'code', 'fast', 'agent', 'research', 'long'];
     return { id: 'x_' + c.id, base: c.base.replace(/\/+$/, ''), key: c.key || 'none', rpm: +c.rpm || 20, tpm: +c.tpm || 0, inflight: +c.inflight || 2, custom: true, models: ms ? Object.fromEntries(roles.map(r => [r, ms])) : (c.models || {}) };
   });
   const all = [...providers, ...custom];
@@ -218,6 +244,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
   }
   async function once(contents, tools, o) {
     const errs = []; const tok = estTokens(contents, o.system, tools);
+    if (tok > 100000 && o.route !== 'vision' && o.route !== 'long') o = { ...o, route: 'long' }; // very long context → 1M-context models first
     let list = expand(o.route || 'main');
     if (o.spread && list.length > 1) { const provs = [...new Set(list.map(x => x.p.id))]; const lead = provs[o.spread % Math.min(provs.length, 3)]; list = [...list.filter(x => x.p.id === lead), ...list.filter(x => x.p.id !== lead)]; }
     for (let pass = 0; pass < 2; pass++) {
