@@ -3,7 +3,7 @@
 import puppeteer from 'puppeteer-core';
 import { writeFileSync, statSync, readFileSync } from 'node:fs';
 import { runAgent, makeRouter } from './agent.js';
-import { CHROME, WD, images, sh, runCode, fs, testWebApp, setLLM } from './tools.mjs';
+import { CHROME, WD, images, sh, runCode, fs, testWebApp, setLLM, prepChromeExts } from './tools.mjs';
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 const b64 = (u) => Buffer.from(u).toString('base64');
@@ -39,9 +39,11 @@ try {
   let cookies = [];
   try { cookies = ((await post('/runner/state', { run: job.run })).cookies || []).filter(keep); } catch { }
   let lastP = 0;
+  let chromeX = null; try { if ((pay.chromeExts || []).length) chromeX = await prepChromeExts(pay.chromeExts); } catch { }
   const ctx = {
+    extensions: pay.extensions || [],
     now: () => Date.now(), llm,
-    browser: () => puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }),
+    browser: () => puppeteer.launch({ executablePath: chromeX ? chromeX.exe : CHROME, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', ...(chromeX ? chromeX.args : [])] }),
     logins: { get: async (site) => (pay.logins || {})[site] || null, list: async () => sites },
     cookies, saveCookies: async (all) => { outCookies = (all || []).filter(keep).map(({ name, value, domain, path, expires, httpOnly, secure, sameSite }) => ({ name, value, domain, path, expires, httpOnly, secure, sameSite })); },
     genImage: keys.gemini ? async (prompt) => {
@@ -62,8 +64,8 @@ try {
     },
     images: { put: async (bytes, mime) => { const id = 'img_' + rid(); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
     progress: pay.kind === 'chat' ? async (info) => { // live status for the phone (+ cancel / new messages back)
-      if (!info.shot && Date.now() - lastP < 1500) return null; lastP = Date.now();
-      return await post('/runner/progress', { run: job.run, label: String(info.label || '').slice(0, 80), step: info.step | 0, shot: info.shot || null });
+      if (!info.shot && !info.agents && Date.now() - lastP < 1500) return null; lastP = Date.now();
+      return await post('/runner/progress', { run: job.run, label: String(info.label || '').slice(0, 80), step: info.step | 0, shot: info.shot || null, agents: info.agents || null });
     } : undefined,
   };
   const budgetMs = pay.budgetMs || 320 * 60000; // GitHub job limit is 340 min: hand over to a fresh runner before it
