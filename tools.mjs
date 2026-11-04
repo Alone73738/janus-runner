@@ -1,6 +1,6 @@
 // JANUS runner tools (shared by run.mjs and the local test harness).
 import puppeteer from 'puppeteer-core';
-import { existsSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync, readFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, resolve as presolve, relative } from 'node:path';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -8,7 +8,7 @@ const rid = () => [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toSt
 const unb64 = (s) => new Uint8Array(Buffer.from(s, 'base64'));
 const CHROME = [process.env.CHROME, '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find(p => p && existsSync(p));
 const WD = process.env.JANUS_WD || '/tmp/janus-work';
-const MIME = { apk: 'application/vnd.android.package-archive', aab: 'application/octet-stream', zip: 'application/zip', tgz: 'application/gzip', txt: 'text/plain', md: 'text/markdown', json: 'application/json', csv: 'text/csv', html: 'text/html', py: 'text/x-python', js: 'text/javascript', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', svg: 'image/svg+xml' };
+const MIME = { apk: 'application/vnd.android.package-archive', aab: 'application/octet-stream', zip: 'application/zip', tgz: 'application/gzip', txt: 'text/plain', md: 'text/markdown', json: 'application/json', csv: 'text/csv', html: 'text/html', py: 'text/x-python', js: 'text/javascript', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', svg: 'image/svg+xml' , mov: 'video/quicktime', mkv: 'video/x-matroska', m4a: 'audio/mp4', ogg: 'audio/ogg', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
 const asNobody = !process.env.JANUS_NO_SUDO; // local tests run without sudo
 mkdirSync(WD + '/inputs', { recursive: true }); try { chmodSync(WD, 0o777); chmodSync(WD + '/inputs', 0o777); } catch { }
 const images = new Map(); // id → {bytes, mime, name}
@@ -142,5 +142,60 @@ async function prepChromeExts(list, fetchImpl = fetch) {
 }
 
 
+
+// ---- v5.1 download_file: public videos via yt-dlp (≤720p, ≤24 MB), direct links via fetch → top-level file → sent to the phone ----
+const VIDEO_RX = /(^|\.)(youtube\.com|youtu\.be|instagram\.com|x\.com|twitter\.com|facebook\.com|fb\.watch|tiktok\.com|vimeo\.com|dailymotion\.com|reddit\.com|pinterest\.com|twitch\.tv|soundcloud\.com)$/i;
+const MAX_DL = 24e6;
+let ytdlp = null;
+async function getYtDlp() {
+  if (ytdlp) return ytdlp;
+  const p = '/tmp/yt-dlp';
+  if (!existsSync(p)) {
+    const r = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp', { redirect: 'follow' });
+    if (!r.ok) throw new Error('could not get yt-dlp (' + r.status + ')');
+    writeFileSync(p, Buffer.from(await r.arrayBuffer())); chmodSync(p, 0o755);
+  }
+  return (ytdlp = p);
+}
+const cleanName = (n, ext) => { let b = String(n || '').replace(/[^\w.() -]/g, '_').replace(/^\.+/, '').slice(0, 80); if (!b) b = 'download'; if (ext && !/\.[a-z0-9]{2,5}$/i.test(b)) b += '.' + ext; return b; };
+async function download(url, name) {
+  let u; try { u = new URL(url); } catch { return { msg: 'Not a valid URL: ' + url }; }
+  if (!/^https?:$/.test(u.protocol)) return { msg: 'Only http(s) links.' };
+  if (VIDEO_RX.test(u.hostname) && !/\.(mp4|webm|mov|m4a|mp3)$/i.test(u.pathname)) {
+    let bin; try { bin = await getYtDlp(); } catch (e) { return { msg: 'ERROR: ' + e.message }; }
+    const out = cleanName(name ? name.replace(/\.[a-z0-9]{2,5}$/i, '') : 'video', '') ;
+    const base = ['--no-playlist', '--playlist-items', '1', '--no-progress', '--restrict-filenames', '--js-runtimes', 'node', '-f', 'b[ext=mp4][height<=720][filesize<24M]/b[ext=mp4][height<=720]/bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/b', '--merge-output-format', 'mp4', '--max-filesize', '24M', '-o', out + '.%(ext)s', url];
+    const tries = [base, ['--extractor-args', 'youtube:player_client=tv,web_safari,android_vr', ...base], ['--extractor-args', 'youtube:player_client=mweb,ios', ...base]];
+    let last = '';
+    for (const args of tries) {
+      for (const f of readdirSync(WD)) if (f.startsWith(out + '.')) { try { unlinkSync(WD + '/' + f); } catch { } }
+      const r = await sh('timeout', ['600', bin, ...args]);
+      const got = readdirSync(WD).filter(f => f.startsWith(out + '.') && !/\.part$|\.ytdl$|\.f\d+\./.test(f));
+      if (r.code === 0 && got.length) {
+        const fn = got.find(f => /\.mp4$/.test(f)) || got[0]; const st = statSync(WD + '/' + fn);
+        if (st.size > MAX_DL) return { msg: 'Video is ' + Math.round(st.size / 1e6) + ' MB (limit 24 MB for the chat). Try a shorter clip.' };
+        const reg = registerTop(fn); if (!reg) return { msg: 'Downloaded ' + fn + ' but could not attach it (type/size).' };
+        return { msg: 'DOWNLOADED ' + fn + ' (' + (st.size / 1e6).toFixed(1) + ' MB) — it is sent to the user in the chat automatically.', file: reg };
+      }
+      last = (r.out || '').split('\n').filter(l => /ERROR|WARNING: .*(sign in|bot|private|unavailable)/i.test(l)).slice(-2).join(' ') || ('exit ' + r.code);
+    }
+    return { msg: 'ERROR: could not download the video: ' + last.slice(0, 300) + (/bot|sign in/i.test(last) ? ' (the site blocks downloads from cloud servers right now; tell the user plainly).' : '') };
+  }
+  try {
+    const r = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36' }, signal: AbortSignal.timeout(300000) });
+    if (!r.ok) return { msg: 'ERROR: HTTP ' + r.status };
+    const ct = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (ct === 'text/html') return { msg: 'ERROR: that link is a web page, not a file. Find the direct file link (or a video page for yt-dlp).' };
+    const len = +(r.headers.get('content-length') || 0); if (len > MAX_DL) return { msg: 'File is ' + Math.round(len / 1e6) + ' MB (limit 24 MB).' };
+    const buf = Buffer.from(await r.arrayBuffer()); if (buf.length > MAX_DL) return { msg: 'File is too big (limit 24 MB).' };
+    const ext = (Object.entries(MIME).find(([, m]) => m === ct) || [])[0] || (u.pathname.split('.').pop() || '').toLowerCase();
+    let fn = cleanName(name || decodeURIComponent(u.pathname.split('/').pop() || ''), MIME[ext] ? ext : '');
+    if (!MIME[(fn.split('.').pop() || '').toLowerCase()]) fn = fn + '.' + (MIME[ext] ? ext : 'zip'); // unknown type: wrap name so it is attachable
+    writeFileSync(WD + '/' + fn, buf); try { chmodSync(WD + '/' + fn, 0o644); } catch { }
+    const reg = registerTop(fn); if (!reg) return { msg: 'Saved ' + fn + ' but this file type cannot be attached.' };
+    return { msg: 'DOWNLOADED ' + fn + ' (' + (buf.length / 1e6).toFixed(1) + ' MB) — sent to the user in the chat automatically.', file: reg };
+  } catch (e) { return { msg: 'ERROR: ' + String(e && e.message || e).slice(0, 200) }; }
+}
+
 export function setLLM(f) { llmRef = f; }
-export { CHROME, WD, MIME, images, registerTop, sh, runCode, fs, testWebApp, prepChromeExts };
+export { CHROME, WD, MIME, images, registerTop, sh, runCode, fs, testWebApp, prepChromeExts, download };
