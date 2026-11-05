@@ -366,7 +366,7 @@ export async function runSubAgents(ctx, list, parent = {}) {
         if (cancelled || ctx.cancelled) { result = { ok: false, result: 'Stopped.' }; break; }
         if (Date.now() - t0 > deadline) { result = { ok: false, result: 'Time limit for this part reached (' + Math.round(deadline / 60000) + ' min). Partial: ' + clip(partsTextOf(contents), 600) }; break; }
         const all = ctx.inboxAll || []; if (all.length > seen) { const add = all.slice(seen); seen = all.length; const last = contents[contents.length - 1]; const note = { text: '[The user added while you work — follow it if it concerns your part]: ' + add.join(' | ') }; if (last.role === 'user') last.parts.push(note); else contents.push({ role: 'user', parts: [note] }); }
-        const r = await ctx.llm(contents, tools, { route: gotPage ? 'agent' : (/research|compare|tulna|review|analy/i.test(String(parent.task || '') + ' ' + task) ? 'research' : 'fast'), system, timeoutMs: 90000, spread: i + 1, maxTokens: 4096 });
+        const r = await ctx.llm(contents, tools, { route: gotPage ? 'agent' : (/research|compare|tulna|review|analy/i.test(String(parent.task || '') + ' ' + task) ? 'research' : 'fast'), system, timeoutMs: 90000, firstMs: 20000, spread: i + 1, maxTokens: 4096 });
         const parts = (r.parts || []).filter(p => p.text || p.functionCall); if (!parts.length) parts.push({ text: '' });
         contents.push({ role: 'model', parts });
         const calls = parts.filter(p => p.functionCall);
@@ -530,7 +530,7 @@ export async function runAgent(ctx, task, opts = {}) {
         for (const c of contents.slice(1, -12)) { if (c._c) continue; c._c = 1; c.parts = (c.parts || []).filter(p => !p.inlineData || c === contents[contents.length - 1]).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 700) } } } : (p.functionCall && p.functionCall.name === 'write_file') ? { functionCall: { name: 'write_file', args: { path: p.functionCall.args.path, content: '(written, ' + String(p.functionCall.args.content || '').length + ' chars; read_file to see it)' } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
       }
       let resp;
-      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: route === 'code' ? 600000 : 150000 }); llmFails = 0; }
+      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: route === 'code' ? 600000 : 120000, firstMs: route === 'code' ? 60000 : 20000 }); llmFails = 0; }
       catch (e) { // every free model busy: wait and retry this step instead of throwing the whole job away
         if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); for (let w = 0; w < 60 && !ctx.cancelled && !(ctx.inbox || []).length; w++) await new Promise(z => setTimeout(z, 1000)); i--; continue; }
         const made = files.length ? ' Jo files ban chuki hain woh neeche hain.' : '';
