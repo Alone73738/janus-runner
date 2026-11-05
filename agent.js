@@ -27,12 +27,13 @@ export const TOOLS = [
   { name: 'run_code', description: 'Run code on the cloud computer (Linux, Python 3, Node 20, Java 17, Android SDK, Gradle; internet on; pip install --user / npm i allowed; no sudo). Use for builds, tests, data work, image/video editing (Pillow, ffmpeg). Files saved at the TOP LEVEL of the work folder come back to the user as files. Input images are in ./inputs/<image_id>.<ext>.', parameters: { type: 'object', properties: { language: { type: 'string', enum: ['python', 'node', 'bash'] }, code: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['language', 'code'] } },
   { name: 'install_packages', description: 'Install Ubuntu (apt) packages on the cloud computer, e.g. ["ffmpeg","imagemagick"]. pip/npm packages: install them inside run_code instead.', parameters: { type: 'object', properties: { apt: { type: 'array', items: { type: 'string' } } }, required: ['apt'] } },
   { name: 'test_web_app', description: 'SELF-TEST a web app/game you built: opens it in headless Chromium on a phone screen (412x915, touch), presses start, swipes/taps, takes screenshots over ~10 s, records JS errors, alert() calls and how much of the screen the game uses, then a vision reviewer critiques it against the quality checklist. Use after every build and after every fix (at least 2 rounds for games). path = html file in the work folder.', parameters: { type: 'object', properties: { path: { type: 'string' }, focus: { type: 'string', description: 'what to look at this round' } }, required: ['path'] } },
-  { name: 'spawn_agents', description: 'Run several sub-agents AT THE SAME TIME, each on one independent part of the job, each shown to the user as its own live card. "5 browser kholo, har ek me ye karo" → exactly 5 tasks with browser=true. Research / compare / check several shops, sites or topics → split it yourself into 4–6 agents. Up to 16 per call; up to 12 browser tabs run at once (the rest queue). Each has web_search/read_url and, when browser=true, its own browser tab. They return short summaries; you then merge them into one answer. task = complete self-contained instructions for that part; title = 2–4 words.', parameters: { type: 'object', properties: { tasks: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, task: { type: 'string' }, browser: { type: 'boolean' } }, required: ['task'] } } }, required: ['tasks'] } },
+  { name: 'spawn_agents', description: 'Run several sub-agents AT THE SAME TIME, each on one independent part of the job, each working in its own TAB of the one cloud browser the user watches. "5 browser kholo, har ek me ye karo" → exactly 5 tasks with browser=true. Research / compare / check several shops, sites or topics → split it yourself into as many agents as the job needs (no fixed limit; tabs beyond the machine RAM simply queue). Each has web_search/read_url and, when browser=true, its own browser tab. They return short summaries; you then merge them into one answer. task = complete self-contained instructions for that part; title = 2–4 words.', parameters: { type: 'object', properties: { tasks: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, task: { type: 'string' }, browser: { type: 'boolean' } }, required: ['task'] } } }, required: ['tasks'] } },
   { name: 'download_file', description: 'Download a file or a public video the user asked for (YouTube/Shorts, Instagram, X, Vimeo, Facebook, Reddit pages via yt-dlp; direct file links via HTTP) into the work folder; it is sent back to the user automatically as a file in the chat. url = the exact video page or file link (find it first). name = optional file name like "zach-king-short.mp4". Max ~24 MB (videos are fetched at ≤720p).', parameters: { type: 'object', properties: { url: { type: 'string' }, name: { type: 'string' } }, required: ['url'] } },
+  { name: 'open_tabs', description: 'Open several web pages at once, each in a new tab of the cloud browser the user watches (e.g. "10 tabs mein Pinterest kholo" → 10 urls). Fast: no sub-agents. Returns each tab title. Use spawn_agents instead when every tab needs real work.', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } },
   { name: 'finish', description: 'The task is done (or truly impossible). result = the final short answer for the user in their language.', parameters: { type: 'object', properties: { result: { type: 'string' }, success: { type: 'boolean' } }, required: ['result', 'success'] } },
 ];
 const RUNNER_ONLY = ['run_code', 'install_packages', 'write_file', 'read_file', 'test_web_app'];
-const BROWSER = ['open_url', 'list_elements', 'click_element', 'type_into', 'select_option', 'scroll_page', 'read_page', 'look_at_screen', 'sign_in', 'upload_image'];
+const BROWSER = ['open_tabs', 'open_url', 'list_elements', 'click_element', 'type_into', 'select_option', 'scroll_page', 'read_page', 'look_at_screen', 'sign_in', 'upload_image'];
 
 const MARK_JS = `(() => {
   document.querySelectorAll('[data-jn]').forEach(e => e.removeAttribute('data-jn'));
@@ -120,7 +121,8 @@ function sysPrompt(task, nowIso, loginSites, opts) {
   return `${mode}
 Now: ${nowIso} (user timezone Asia/Kolkata).
 ${CORE_RULES}
-TOOLS: web_search/read_url for facts (cite sources as [1] with URLs when you use them); the cloud browser (open_url, list_elements, click/type by element number, look_at_screen to check); sign_in for login forms; generate_image for pictures; download_file for files/videos the user wants in the chat (never say you cannot download into the chat); spawn_agents to run many sub-agents in parallel ("N browser kholo" → exactly N browser agents; research/compare → 4–6 agents by yourself), then merge their summaries.
+MAIN AGENT: you own this chat. Messages the user sends while you work arrive as [NEW MESSAGE …]: read them at once, treat them as a correction, an addition or a stop, start your next reply with ONE short line acknowledging it (user's language), then continue with the updated job. Never ignore them.
+TOOLS: web_search/read_url for facts (cite sources as [1] with URLs when you use them); the cloud browser (open_url, list_elements, click/type by element number, look_at_screen to check); sign_in for login forms; generate_image for pictures; download_file for files/videos the user wants in the chat (never say you cannot download into the chat); open_tabs to open many pages at once; spawn_agents to run many sub-agents in parallel, each in its own tab of the same browser ("N browser kholo" → exactly N browser agents; research/compare → as many agents as useful), then merge their summaries into one answer.
 ${opts.chat ? 'BEFORE YOUR FIRST TOOL CALL write ONE short line (max 12 words, user\'s language) saying what you are about to do, e.g. "Theek hai, 5 browsers khol ke compare karta hun…", and call the tools in the same reply. Never wait for a plan confirmation; start right away. The user watches your browser live, so the final answer is just the result (no step lists, no element numbers).' : ''}
 Saved logins you can use with sign_in: ${lg}. If the task needs a site whose login is not in this list (and Google is not usable for it), do not guess: say exactly "<site> ka login cloud mein share nahi hai. JANUS → Settings → Cloud → Logins mein Share dabao." Saved browser cookies may already keep you logged in, so open the site first and check.
 If a site needs an OTP/captcha/approval you cannot do, stop and say what is needed.
@@ -132,17 +134,55 @@ ${opts.chat ? '' : 'TASK: ' + task}`;
 
 /** Shared cloud browser: one Chromium per job, one page (tab) per agent. Extensions (userscripts) run on every page. */
 export async function sharedBrowser(ctx) { if (!ctx._browser) ctx._browser = Promise.resolve(ctx.browser()); return ctx._browser; }
-export async function newPage(ctx) {
+export async function newPage(ctx, owner) {
   const b = await sharedBrowser(ctx); const page = await b.newPage();
+  const tab = registerTab(ctx, page, owner);
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36');
   if (ctx.cookies && ctx.cookies.length && !ctx._cookiesSet) { ctx._cookiesSet = true; try { const c = await page.createCDPSession(); await c.send('Network.setCookies', { cookies: ctx.cookies }); } catch { } }
   for (const e of ctx.extensions || []) { if (e && e.enabled !== false && e.code) { try { await page.evaluateOnNewDocument(e.code); } catch { } } }
-  return page;
+  page._jt = tab; return page;
 }
+/** v5.2: every page is a TAB of the one cloud browser the phone shows (tab strip + live view of one tab).
+ *  ctx.tabs = [{id, page, owner, u, t, s, ts, closed}], ctx.activeTab = the tab an agent acted on last. */
+export function registerTab(ctx, page, owner) {
+  ctx.tabs = ctx.tabs || []; ctx._tabN = (ctx._tabN || 0) + 1;
+  const t = { id: 't' + ctx._tabN, page, owner: owner == null ? 'main' : owner, u: '', t: 'New tab', s: 'run', ts: Date.now() };
+  ctx.tabs.push(t); ctx.activeTab = t.id;
+  const upd = async () => { try { t.u = page.url(); const ti = await page.title(); t.t = clip(String(ti || '').trim(), 60) || host(t.u); t.ts = Date.now(); } catch { } };
+  try {
+    page.on('framenavigated', f => { try { if (f === page.mainFrame()) { t.u = f.url(); t.ts = Date.now(); upd(); } } catch { } });
+    page.on('load', upd); page.on('domcontentloaded', upd);
+    page.on('close', () => { t.closed = true; t.page = null; if (t.s === 'run') t.s = 'done'; });
+  } catch { }
+  return t;
+}
+/** Before a new page: close the oldest finished tabs so open pages never exceed the RAM-based pool (last screenshot kept). */
+export async function roomPage(ctx, owner) { // serialized: free a slot, then open the page (no race between agents)
+  const prev = ctx._room || Promise.resolve(); let done; ctx._room = new Promise(r => { done = r; });
+  try { await prev; await makeRoom(ctx); return await newPage(ctx, owner); } finally { done(); } }
+export async function makeRoom(ctx) { const lim = pagesFor(ctx); let open = (ctx.tabs || []).filter(t => t.page); for (const t of open.filter(t => t.s !== 'run')) { if (open.length < lim) break; if (ctx.snapTab) { try { await ctx.snapTab(t); } catch { } } const p = t.page; t.page = null; t.closed = true; open = open.filter(x => x !== t); try { await p.close(); } catch { } } }
+export function tabOf(ctx, page) { return page && page._jt ? page._jt : null; }
+export function markActive(ctx, page) { const t = tabOf(ctx, page); if (t) { ctx.activeTab = t.id; t.ts = Date.now(); } }
+/** Close every page (stop button, end of a job); the tab entries keep their last screenshot for the phone. */
+export async function closeAllTabs(ctx) { for (const t of ctx.tabs || []) { if (t.page) { const p = t.page; t.page = null; t.closed = true; try { await p.close(); } catch { } } } }
+/** Best-effort URL for a sub-task / quick task, so a tab can open the site BEFORE the first (slow) model call. */
+const SITE_URLS = { pinterest: 'https://www.pinterest.com/', youtube: 'https://m.youtube.com/', 'you tube': 'https://m.youtube.com/', google: 'https://www.google.com/', amazon: 'https://www.amazon.in/', flipkart: 'https://www.flipkart.com/', instagram: 'https://www.instagram.com/', facebook: 'https://www.facebook.com/', twitter: 'https://x.com/', linkedin: 'https://www.linkedin.com/', github: 'https://github.com/', reddit: 'https://www.reddit.com/', wikipedia: 'https://www.wikipedia.org/', myntra: 'https://www.myntra.com/', netflix: 'https://www.netflix.com/', spotify: 'https://open.spotify.com/', zomato: 'https://www.zomato.com/', swiggy: 'https://www.swiggy.com/', meesho: 'https://www.meesho.com/', ajio: 'https://www.ajio.com/', croma: 'https://www.croma.com/', nykaa: 'https://www.nykaa.com/', tumblr: 'https://www.tumblr.com/', bing: 'https://www.bing.com/', duckduckgo: 'https://duckduckgo.com/', chatgpt: 'https://chatgpt.com/', gmail: 'https://mail.google.com/', quora: 'https://www.quora.com/', imdb: 'https://www.imdb.com/', 'hacker news': 'https://news.ycombinator.com/' };
+export function guessUrl(text) {
+  const t = String(text || ''); const m = /https?:\/\/[^\s"'<>)]+/i.exec(t); if (m) return m[0];
+  const d = /\b([a-z0-9-]+\.(?:com|in|org|net|io|co|dev|app|ai|me|tv)(?:\.[a-z]{2})?)(\/[^\s]*)?\b/i.exec(t); if (d) return 'https://' + d[1] + (d[2] || '/');
+  const lo = t.toLowerCase(); let best = null, at = 1e9;
+  for (const k of Object.keys(SITE_URLS)) { const i = lo.search(new RegExp('\\b' + k + '\\b')); if (i >= 0 && i < at) { at = i; best = SITE_URLS[k]; } }
+  if (best) { const q = /(?:search|dhoondo|dhundo|find|search karo|par|pe)\s+(?:for\s+)?["“]?([^"”\n]{2,60})["”]?/i.exec(t); if (q && /youtube/.test(best)) return 'https://m.youtube.com/results?search_query=' + encodeURIComponent(q[1].replace(/\b(on|par|pe)\s+youtube.*$/i, '').trim()); return best; }
+  return null;
+}
+/** "Open X" / "X kholo" with nothing else to do: a tab can finish without asking a model. */
+export function isJustOpen(text) { const t = String(text || '').toLowerCase().replace(/[!?,]|\.(\s|$)/g, ' ').replace(/\s+/g, ' ').trim(); if (t.length > 80) return false; if (!guessUrl(t)) return false; const rest = t.replace(/https?:\/\/\S+/g, ' ').replace(/\b(open|kholo|khol|khol do|karo|kar do|please|plz|pls|jaldi|fast|quick|quickly|abhi|in|mein|me|ek|tab|tabs|new|naya|browser|site|website|the|a|par|pe|jao|go|to|and|aur|do|de|dena|show|dikhao|[0-9]+(st|nd|rd|th)?|no|number|wala|wali)\b/g, ' ');
+  return !Object.keys(SITE_URLS).reduce((r, k) => r.replace(new RegExp('\\b' + k + '\\b', 'g'), ' '), rest.replace(/[a-z0-9-]+\.(com|in|org|net|io|co|dev|app|ai|me|tv)\S*/g, ' ')).trim(); }
 const settle = async (p) => { try { await p.waitForNetworkIdle({ idleTime: 500, timeout: 6000 }); } catch { } };
 /** Browser tools bound to one page (main agent and every sub-agent get their own). info = {task, step()} */
-export function pageTools(ctx, getPage, info) {
+export function pageTools(ctx, getPage0, info) {
+  const getPage = async () => { const p = await getPage0(); markActive(ctx, p); return p; };
   const el = async (id) => { const p = await getPage(); const h = await p.$(`[data-jn="${id}"]`); if (!h) throw new Error('element ' + id + ' not found; call list_elements'); return h; };
   return {
     open_url: async ({ url }) => { const p = await getPage(); await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }); await settle(p); return 'Title: ' + (await p.title()) + '\nURL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
@@ -277,7 +317,7 @@ export function introLine(calls, lang = 'en') {
 }
 
 // ---------------- Parallel sub-agents (orchestrator) ----------------
-export const SUB_MAX = 16, SUB_PAGES = 12; // v5.1: up to 12 browser pages at once (fewer when the runner's free RAM is low), the rest queue
+export const SUB_MAX = 60, SUB_PAGES = 12; // v5.1: up to 12 browser pages at once (fewer when the runner's free RAM is low), the rest queue
 const PAGE_MB = 420; // measured: a heavy page (YouTube/Amazon) in headless Chrome ≈ 250–400 MB incl. renderer; keep 1.5 GB free
 export function pagesFor(ctx) { const max = ctx.subPages || SUB_PAGES; if (!ctx.memFree) return max; const free = ctx.memFree() / 1048576; return Math.max(2, Math.min(max, Math.floor((free - 1536) / PAGE_MB))); }
 const SUB_TOOLS = ['web_search', 'read_url', 'open_url', 'list_elements', 'click_element', 'type_into', 'select_option', 'scroll_page', 'read_page', 'look_at_screen', 'sign_in', 'finish'];
@@ -296,28 +336,37 @@ export async function runSubAgents(ctx, list, parent = {}) {
   const push = async (force) => {
     if (!parent.progress || (!force && Date.now() - lastPush < 1500)) return; lastPush = Date.now();
     const done = state.filter(s => s.s === 'done' || s.s === 'fail').length;
-    const r = await parent.progress({ label: done < items.length ? (lang === 'hi' ? items.length + ' agents kaam kar rahe hain · ' + done + ' ho gaye' : items.length + ' agents working · ' + done + ' done') : sayLine('_merge', {}, lang)[0], kind: 'agents', step: parent.step ? parent.step() : 0, agents: state });
-    if (r && r.cancel) cancelled = true;
+    const r = await parent.progress({ label: done < items.length ? groupLine(items, state, done, lang) : sayLine('_merge', {}, lang)[0], kind: 'agents', step: parent.step ? parent.step() : 0, agents: state.map(({ th, ...x }) => x) });
+    if ((r && r.cancel) || ctx.cancelled) cancelled = true;
   };
   const one = async (x, i) => {
     const task = String(x.task || x.title);
-    let page = null, gotPage = false, lastThumb = 0;
+    let page = null, gotPage = false, seen = (ctx.inboxAll || []).length; const t0 = Date.now(); const deadline = +x.deadline_ms || SUB_DEADLINE;
     if (state[i].b) { await push(); await acquire(); gotPage = true; }
+    if (cancelled) { if (gotPage) release(); state[i].s = 'fail'; return { title: state[i].t, ok: false, result: 'Stopped.' }; }
     state[i].s = 'run'; state[i].l = sayLine('_start', {}, lang)[0]; await push();
-    const getPage = async () => { if (!page) page = await newPage(ctx); return page; };
-    const thumb = async (force) => { // tiny live thumbnail of this agent's page for its card on the phone (~10 KB)
-      if (!page || (!force && Date.now() - lastThumb < 3000)) return; lastThumb = Date.now();
-      try { const c = await page.createCDPSession(); const vp = page.viewport() || { width: 1280, height: 900 }; const { data } = await c.send('Page.captureScreenshot', { format: 'jpeg', quality: 40, clip: { x: 0, y: 0, width: vp.width, height: Math.round(vp.width * 10 / 16), scale: 0.28 } }); await c.detach().catch(() => { }); if (data && data.length < 40000) state[i].th = data; } catch { }
-    };
+    const getPage = async () => { if (!page) { page = await roomPage(ctx, 'a' + i); const tb = tabOf(ctx, page); if (tb) { tb.t = state[i].t; state[i].tab = tb.id; } } return page; };
+    const thumb = async () => { };
+    // v5.2: open the site right away (before the first, slow model call) so the tab shows real content at once
+    const pre = gotPage ? guessUrl(task) : null;
+    if (pre) { try { const pg = await getPage(); const [l, k] = sayLine('open_url', { url: pre }, lang); state[i].l = l; state[i].k = k; await push(); await pg.goto(pre, { waitUntil: 'domcontentloaded', timeout: 25000 }); } catch { } }
+    if (pre && isJustOpen(task)) { // nothing else to do in this tab
+      let ti = ''; try { ti = await page.title(); } catch { }
+      if (page) { const tb = tabOf(ctx, page); if (tb) tb.s = 'done'; } if (gotPage) release();
+      state[i].s = 'done'; state[i].l = ''; await push(true);
+      return { title: state[i].t, ok: true, result: 'Opened ' + pre + (ti ? ' — "' + clip(ti, 80) + '"' : '') + ' (tab stays open for the user).' };
+    }
     const tools = TOOLS.filter(t => SUB_TOOLS.includes(t.name) && (gotPage || !BROWSER.includes(t.name)));
     const impl = { web_search: async ({ query }) => S(await webSearch(query)), read_url: async ({ url }) => await readUrl(url), ...(gotPage ? pageTools(ctx, getPage, { task, step: () => 0 }) : {}) };
     const system = `You are sub-agent ${i + 1} of ${items.length}, working for JANUS on ONE part of a bigger job. Do only your part, quickly: use tools, then call finish(result, success) with a compact factual summary (max 12 lines; include the URLs, prices and numbers you found). Nobody can answer questions. Never type passwords (logins only via sign_in). Answer in the language of the task.\nPARENT JOB (context only): ${clip(String(parent.task || ''), 600)}\nYOUR PART: ${task}`;
-    const contents = [{ role: 'user', parts: [{ text: 'Do your part now.' }] }];
+    const contents = [{ role: 'user', parts: [{ text: pre ? 'Do your part now. Your tab already opened ' + pre + ' (call list_elements to see it).' : 'Do your part now.' }] }];
     let result = null;
     try {
       for (let k = 0; k < (x.steps || 14) && !result; k++) {
-        if (cancelled) { result = { ok: false, result: 'Stopped.' }; break; }
-        const r = await ctx.llm(contents, tools, { route: gotPage ? 'agent' : (/research|compare|tulna|review|analy/i.test(String(parent.task || '') + ' ' + task) ? 'research' : 'fast'), system, timeoutMs: 240000, spread: i + 1, maxTokens: 4096 });
+        if (cancelled || ctx.cancelled) { result = { ok: false, result: 'Stopped.' }; break; }
+        if (Date.now() - t0 > deadline) { result = { ok: false, result: 'Time limit for this part reached (' + Math.round(deadline / 60000) + ' min). Partial: ' + clip(partsTextOf(contents), 600) }; break; }
+        const all = ctx.inboxAll || []; if (all.length > seen) { const add = all.slice(seen); seen = all.length; const last = contents[contents.length - 1]; const note = { text: '[The user added while you work — follow it if it concerns your part]: ' + add.join(' | ') }; if (last.role === 'user') last.parts.push(note); else contents.push({ role: 'user', parts: [note] }); }
+        const r = await ctx.llm(contents, tools, { route: gotPage ? 'agent' : (/research|compare|tulna|review|analy/i.test(String(parent.task || '') + ' ' + task) ? 'research' : 'fast'), system, timeoutMs: 90000, spread: i + 1, maxTokens: 4096 });
         const parts = (r.parts || []).filter(p => p.text || p.functionCall); if (!parts.length) parts.push({ text: '' });
         contents.push({ role: 'model', parts });
         const calls = parts.filter(p => p.functionCall);
@@ -336,7 +385,11 @@ export async function runSubAgents(ctx, list, parent = {}) {
       }
       if (!result) result = { ok: false, result: 'Step limit reached before finishing.' };
     } catch (e) { result = { ok: false, result: 'Failed: ' + clip(String(e && e.message || e), 160) }; }
-    finally { if (page) { await thumb(true); try { await page.close(); } catch { } } if (gotPage) release(); }
+    finally {
+      if (page) { const tb = tabOf(ctx, page); if (tb) tb.s = result && result.ok ? 'done' : 'fail'; // the tab stays open (the user can look at it) until room is needed (makeRoom) or RAM runs low
+        if (ctx.memFree && ctx.memFree() < 1200 * 1048576) { if (ctx.snapTab && tb) { try { await ctx.snapTab(tb); } catch { } } try { await page.close(); } catch { } } }
+      if (gotPage) release();
+    }
     state[i].s = result.ok ? 'done' : 'fail'; state[i].l = ''; await push(true);
     return { title: state[i].t, ok: result.ok, result: clip(String(result.result || ''), 2000) };
   };
@@ -344,11 +397,32 @@ export async function runSubAgents(ctx, list, parent = {}) {
   return S({ agents: out, note: 'All sub-agents finished. Merge their results into one clear answer (or continue the job with them).' });
 }
 
+const SUB_DEADLINE = 6 * 60000;
+const partsTextOf = (contents) => contents.map(c => (c.parts || []).map(p => p.text || '').join(' ')).join(' ').replace(/\s+/g, ' ').trim();
+/** "10 tabs mein Pinterest khol raha hun · 3 done" when every agent works on the same site, else "10 agents working · 3 done". */
+function groupLine(items, state, done, lang) {
+  const n = items.length; const urls = items.map(x => guessUrl(String(x.task || x.title)) || ''); const same = urls[0] && urls.every(u => u && siteKey(u) === siteKey(urls[0]));
+  if (same && state.every(s => s.b)) { const nm = siteName(urls[0]); return lang === 'hi' ? `${n} tabs mein ${nm} khol raha hun · ${done} done` : `Opening ${nm} in ${n} tabs · ${done} done`; }
+  return lang === 'hi' ? `${n} agents kaam kar rahe hain · ${done} ho gaye` : `${n} agents working · ${done} done`;
+}
+/** open_tabs: N pages at once (no sub-agents). */
+export async function openTabs(ctx, urls, lang, progress) {
+  const list = (Array.isArray(urls) ? urls : [urls]).map(u => String(u || '').trim()).filter(Boolean).map(u => /^[a-z]+:\/\//i.test(u) ? u : (guessUrl(u) || 'https://duckduckgo.com/?q=' + encodeURIComponent(u))).slice(0, 40);
+  if (!list.length) return 'No urls given.';
+  let done = 0; const nm = siteName(list[0]); const same = list.every(u => siteKey(u) === siteKey(list[0]));
+  const line = () => same ? (lang === 'hi' ? `${list.length} tabs mein ${nm} khol raha hun · ${done} done` : `Opening ${nm} in ${list.length} tabs · ${done} done`) : (lang === 'hi' ? `${list.length} tabs khol raha hun · ${done} done` : `Opening ${list.length} tabs · ${done} done`);
+  if (progress) await progress({ label: line(), kind: 'globe' });
+  const lim = Math.max(2, pagesFor(ctx)); let next = 0; const out = new Array(list.length);
+  const worker = async () => { while (next < list.length && !ctx.cancelled) { const k = next++; let pg; try { pg = await roomPage(ctx, 'tab'); await pg.goto(list[k], { waitUntil: 'domcontentloaded', timeout: 25000 }); const tb = tabOf(ctx, pg); if (tb) tb.s = 'done'; out[k] = 'tab ' + (k + 1) + ': ' + clip(await pg.title(), 80) + ' — ' + pg.url(); } catch (e) { out[k] = 'tab ' + (k + 1) + ': failed (' + clip(String(e && e.message || e), 60) + ')'; if (pg) { const tb = tabOf(ctx, pg); if (tb) tb.s = 'fail'; } } done++; if (progress) await progress({ label: line(), kind: 'globe' }); } };
+  await Promise.all(Array.from({ length: Math.min(lim, list.length) }, worker));
+  return out.join('\n') + '\n(All tabs stay open in the browser the user is watching.)';
+}
 export async function runAgent(ctx, task, opts = {}) {
   const maxSteps = opts.maxSteps || 25;
   const steps = []; const images = []; const files = [];
-  let page = null;
-  const getPage = async () => { if (!page) page = await newPage(ctx); return page; };
+  let page = (() => { const t = (ctx.tabs || []).find(x => x.id === ctx.activeTab && x.page); return t ? t.page : null; })(); // v5.2: the browser from the last message is still open
+  const openBefore = page ? (() => { try { return page.url(); } catch { return ''; } })() : '';
+  const getPage = async () => { if (!page || (page.isClosed && page.isClosed())) { page = await roomPage(ctx, 'main'); } return page; };
 
   const impl = {
     web_search: async ({ query }) => S(await webSearch(query)),
@@ -372,6 +446,7 @@ export async function runAgent(ctx, task, opts = {}) {
     },
     ...pageTools(ctx, getPage, { task, step: () => stepNo }),
     spawn_agents: async ({ tasks }) => { return runSubAgents(ctx, tasks, { task, lang, progress, step: () => stepNo }); },
+    open_tabs: async ({ urls }) => openTabs(ctx, urls, lang, (i) => progress({ ...i, step: stepNo })),
     download_file: async ({ url, name }) => {
       if (!ctx.download) return 'download_file needs the cloud computer (GitHub runner); not available here.';
       const r = await ctx.download(String(url || ''), String(name || ''));
@@ -419,23 +494,45 @@ export async function runAgent(ctx, task, opts = {}) {
     contents = [];
     for (const m of (opts.chat.history || []).slice(-24)) { const t = clip(String(m.text || ''), 6000); if (!t) continue; contents.push({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: t }] }); }
     while (contents.length && contents[0].role !== 'user') contents.shift();
-    const parts = [{ text: task || 'See the attached image.' }]; for (const im of (opts.chat.images || []).slice(0, 4)) parts.push({ inlineData: { mimeType: im.mime || 'image/jpeg', data: im.b64 } });
+    const parts = [{ text: (task || 'See the attached image.') + (openBefore && !/^about:/.test(openBefore) ? '\n\n[The browser from before is still open on: ' + openBefore + ' (' + ((ctx.tabs || []).filter(t => t.page).length) + ' open tabs). If this message continues that, keep working there (list_elements first).]' : '') }]; for (const im of (opts.chat.images || []).slice(0, 4)) parts.push({ inlineData: { mimeType: im.mime || 'image/jpeg', data: im.b64 } });
     if (contents.length && contents[contents.length - 1].role === 'user') contents.push({ role: 'model', parts: [{ text: '…' }] });
     contents.push({ role: 'user', parts });
   } else contents = [{ role: 'user', parts: [{ text: 'Do the task now.' }] }];
   const hasImg = contents.some(c => (c.parts || []).some(p => p.inlineData));
   let result = null, nudges = 0, checks = 0, cont = null, cutHint = false, hintNow = false, llmFails = 0, introSent = !!opts.state;
   const tools = TOOLS.filter(t => (ctx.runCode || !RUNNER_ONLY.includes(t.name)) && (t.name !== 'write_file' || ctx.fs) && (t.name !== 'test_web_app' || ctx.testWebApp));
+  // v5.2 main-agent inbox: every message the user sends while we work is read before the next step
+  let pendingAck = false;
+  const takeInbox = () => { const l = (ctx.inbox || []).splice(0); return l.filter(x => String(x || '').trim()); };
+  const addInbox = (l, intoParts) => {
+    const txt = l.map(t => '[NEW MESSAGE from the user while you work — treat it as a correction, an addition or a stop; first write ONE short line acknowledging it in their language, then continue with the updated job]: ' + t).join('\n');
+    if (intoParts) intoParts.push({ text: txt }); else { const last = contents[contents.length - 1]; if (last && last.role === 'user') last.parts.push({ text: txt }); else contents.push({ role: 'user', parts: [{ text: txt }] }); }
+    pendingAck = true; steps.push({ tool: 'inbox', args: {}, out: clip(l.join(' | '), 200) });
+  };
+  const waitIfPaused = async () => { let n = 0; while (ctx.pausedUntil && ctx.pausedUntil > ctx.now() && !ctx.cancelled && n++ < 600) { if (n === 1) await progress({ label: lang === 'hi' ? 'Aap browser chala rahe ho — ruka hua hun' : 'You are using the browser — paused', kind: 'eye', step: stepNo }); await new Promise(z => setTimeout(z, 500)); } };
+  // v5.2 instant path: "Pinterest kholo" needs no model at all
+  if (opts.chat && !opts.state && ctx.browser && isJustOpen(task) && !(opts.chat.images || []).length) {
+    const url = guessUrl(task); const nm = siteName(url);
+    try {
+      await progress({ intro: lang === 'hi' ? `Theek hai, ${nm} khol raha hun…` : `Sure — opening ${nm}…`, label: sayLine('open_url', { url }, lang)[0], kind: 'globe', step: ++stepNo });
+      const out = await impl.open_url({ url }); steps.push({ tool: 'open_url', args: { url }, out: clip(String(out), 300) });
+      if (ctx.snapNow) { try { await ctx.snapNow(); } catch { } }
+      let ti = ''; try { ti = await page.title(); } catch { }
+      return { success: true, result: lang === 'hi' ? `${nm} khul gaya ✓${ti ? ' — “' + clip(ti, 60) + '”' : ''}. Upar browser mein dekh lo; text box pe tap karke seedha type bhi kar sakte ho. Aage kya karna hai?` : `${nm} is open ✓${ti ? ' — “' + clip(ti, 60) + '”' : ''}. It's in the browser above; tap any text box to type. What next?`, steps, images, files, keepTabs: true, model: 'instant' };
+    } catch (e) { steps.push({ tool: 'open_url', args: { url }, out: 'ERROR ' + clip(String(e && e.message || e), 120) }); }
+  }
   try {
     for (let i = 0; i < maxSteps && !result; i++) {
       if (opts.budgetMs && ctx.now() - t0 > opts.budgetMs) { cont = true; break; }
+      if (ctx.cancelled) { result = { success: false, result: 'Stopped by you.' }; break; }
+      { const l = takeInbox(); if (l.length) { addInbox(l); await progress({ label: lang === 'hi' ? 'Aapka naya message padh liya' : 'Got your new message', kind: 'spark', step: stepNo }); } }
       if (contents.length > 40) { // keep long jobs lean: old screenshots out, old tool outputs short
         for (const c of contents.slice(1, -12)) { if (c._c) continue; c._c = 1; c.parts = (c.parts || []).filter(p => !p.inlineData || c === contents[contents.length - 1]).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 700) } } } : (p.functionCall && p.functionCall.name === 'write_file') ? { functionCall: { name: 'write_file', args: { path: p.functionCall.args.path, content: '(written, ' + String(p.functionCall.args.content || '').length + ' chars; read_file to see it)' } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
       }
       let resp;
-      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: 600000 }); llmFails = 0; }
+      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: route === 'code' ? 600000 : 150000 }); llmFails = 0; }
       catch (e) { // every free model busy: wait and retry this step instead of throwing the whole job away
-        if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); await new Promise(z => setTimeout(z, 60000)); i--; continue; }
+        if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); for (let w = 0; w < 60 && !ctx.cancelled && !(ctx.inbox || []).length; w++) await new Promise(z => setTimeout(z, 1000)); i--; continue; }
         const made = files.length ? ' Jo files ban chuki hain woh neeche hain.' : '';
         result = { success: false, result: 'Abhi saare free AI models busy/limit pe hain, isliye kaam beech mein rukna pada (' + steps.length + ' steps ho chuke the).' + made + ' Thodi der baad "continue" bolo.' }; break;
       }
@@ -445,6 +542,9 @@ export async function runAgent(ctx, task, opts = {}) {
       contents.push({ role: 'model', parts });
       const calls = parts.filter(p => p.functionCall);
       const fresh = []; // messages the user sent while we work (cloud chat inbox)
+      if (pendingAck) { const said = parts.map(p => p.text || '').join('').replace(/\s+/g, ' ').trim(); if (said && calls.length) { pendingAck = false; await progress({ ack: clip(said, 200), step: stepNo }); } else if (!calls.length) pendingAck = false; }
+      if (ctx.cancelled) { result = { success: false, result: 'Stopped by you.' }; break; }
+      if (!calls.length && (ctx.inbox || []).length) { continue; } // a new message arrived while the model answered: read it first
       if (!calls.length) {
         const t = parts.map(p => p.text || '').join('').trim();
         if (opts.chat && t) {
@@ -472,9 +572,10 @@ export async function runAgent(ctx, task, opts = {}) {
           result = claim; break;
         }
         stepNo++;
+        await waitIfPaused();
         const pr = await progress({ label: label(name, args), kind: kindOf(name, args), step: stepNo, tool: name });
-        if (pr && pr.cancel) { result = { success: false, result: 'Stopped by you.' }; break; }
-        if (pr && pr.inbox && pr.inbox.length) fresh.push(...pr.inbox);
+        if ((pr && pr.cancel) || ctx.cancelled) { result = { success: false, result: 'Stopped by you.' }; break; }
+        if (pr && pr.inbox && pr.inbox.length && !ctx.inboxHandled) fresh.push(...pr.inbox);
         let out, img = null;
         try { const f = impl[name]; if (!f) throw new Error('unknown tool'); out = await f(args); if (out && typeof out === 'object') { img = out.image; out = out.text; } }
         catch (e) { out = 'ERROR: ' + (e && e.message || e); }
@@ -486,12 +587,13 @@ export async function runAgent(ctx, task, opts = {}) {
         }
       }
       if (hintNow) { hintNow = false; outs.push({ text: '[JANUS: one of your replies was too long and got cut off by the AI provider. Keep every tool call short from now on: write big files in parts of at most 150 lines (first write_file, then write_file with append=true).]' }); }
-      if (fresh.length) outs.push({ text: fresh.map(t => '[NEW MESSAGE from the user while you work — handle it together with the current task]: ' + t).join('\n') });
+      { const l = fresh.concat(takeInbox()); if (l.length && !result) { addInbox(l, outs); await progress({ label: lang === 'hi' ? 'Aapka naya message padh liya' : 'Got your new message', kind: 'spark', step: stepNo }); } }
       if (!result && outs.length) contents.push({ role: 'user', parts: outs });
     }
   } finally {
     if (page && ctx.saveCookies) { try { const c = await page.createCDPSession(); const { cookies } = await c.send('Network.getAllCookies'); await ctx.saveCookies(cookies); } catch { } }
     try { if (ctx._browser && !opts.keepBrowser) { const b = await ctx._browser; ctx._browser = null; await b.close(); } } catch { }
+    // (warm runner: keepBrowser = the browser process stays for the next job; run.mjs closes the pages)
   }
   if (cont) return { cont: { contents: contents.map(c => ({ role: c.role, parts: (c.parts || []).filter(p => !p.inlineData) })).map(c => c.parts.length ? c : { role: c.role, parts: [{ text: '…' }] }), stepNo, steps: steps.slice(-60), images: images.slice(-6), files: files.slice(-8) }, success: false, result: '', steps, images, files: files.slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
   if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Last steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
