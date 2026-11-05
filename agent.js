@@ -177,6 +177,8 @@ export function guessUrl(text) {
   return null;
 }
 /** "Open X" / "X kholo" with nothing else to do: a tab can finish without asking a model. */
+/** "10 tabs mein Pinterest kholo" → 10 (only when nothing else is asked) */
+export function tabCount(text) { const m = /\b(\d{1,2})\s*(tabs?|browsers?|windows?|baar|times)\b/i.exec(String(text || '')); const n = m ? +m[1] : 0; return n >= 2 && n <= 40 ? n : 0; }
 export function isJustOpen(text) { const t = String(text || '').toLowerCase().replace(/[!?,]|\.(\s|$)/g, ' ').replace(/\s+/g, ' ').trim(); if (t.length > 80) return false; if (!guessUrl(t)) return false; const rest = t.replace(/https?:\/\/\S+/g, ' ').replace(/\b(open|kholo|khol|khol do|karo|kar do|please|plz|pls|jaldi|fast|quick|quickly|abhi|in|mein|me|ek|tab|tabs|new|naya|browser|site|website|the|a|par|pe|jao|go|to|and|aur|do|de|dena|show|dikhao|[0-9]+(st|nd|rd|th)?|no|number|wala|wali)\b/g, ' ');
   return !Object.keys(SITE_URLS).reduce((r, k) => r.replace(new RegExp('\\b' + k + '\\b', 'g'), ' '), rest.replace(/[a-z0-9-]+\.(com|in|org|net|io|co|dev|app|ai|me|tv)\S*/g, ' ')).trim(); }
 const settle = async (p) => { try { await p.waitForNetworkIdle({ idleTime: 500, timeout: 6000 }); } catch { } };
@@ -511,7 +513,17 @@ export async function runAgent(ctx, task, opts = {}) {
   };
   const waitIfPaused = async () => { let n = 0; while (ctx.pausedUntil && ctx.pausedUntil > ctx.now() && !ctx.cancelled && n++ < 600) { if (n === 1) await progress({ label: lang === 'hi' ? 'Aap browser chala rahe ho — ruka hua hun' : 'You are using the browser — paused', kind: 'eye', step: stepNo }); await new Promise(z => setTimeout(z, 500)); } };
   // v5.2 instant path: "Pinterest kholo" needs no model at all
-  if (opts.chat && !opts.state && ctx.browser && isJustOpen(task) && !(opts.chat.images || []).length) {
+  if (opts.chat && !opts.state && ctx.browser && isJustOpen(task) && tabCount(task) && !(opts.chat.images || []).length) { // "10 tabs mein Pinterest kholo"
+    const url = guessUrl(task); const nm = siteName(url); const n = tabCount(task);
+    try {
+      await progress({ intro: lang === 'hi' ? `Theek hai, ${n} tabs mein ${nm} khol raha hun…` : `Sure — opening ${nm} in ${n} tabs…`, label: lang === 'hi' ? `${n} tabs mein ${nm} khol raha hun · 0 done` : `Opening ${nm} in ${n} tabs · 0 done`, kind: 'globe', step: ++stepNo });
+      const out = await openTabs(ctx, Array(n).fill(url), lang, (i) => progress({ ...i, step: stepNo })); steps.push({ tool: 'open_tabs', args: { n }, out: clip(out, 300) });
+      if (ctx.snapNow) { try { await ctx.snapNow(); } catch { } }
+      const ok = (out.match(/^tab \d+: (?!failed)/gm) || []).length;
+      return { success: ok > 0, result: lang === 'hi' ? `${ok}/${n} tabs mein ${nm} khul gaya ✓. Upar tabs pe tap karke koi bhi tab dekho; text box pe tap karke type bhi kar sakte ho. Har tab mein kya karna hai?` : `${nm} is open in ${ok}/${n} tabs ✓. Tap a tab above to see it; tap any text box to type. What should each tab do?`, steps, images, files, model: 'instant' };
+    } catch (e) { steps.push({ tool: 'open_tabs', args: { n }, out: 'ERROR ' + clip(String(e && e.message || e), 120) }); }
+  }
+  if (opts.chat && !opts.state && ctx.browser && isJustOpen(task) && !tabCount(task) && !(opts.chat.images || []).length) {
     const url = guessUrl(task); const nm = siteName(url);
     try {
       await progress({ intro: lang === 'hi' ? `Theek hai, ${nm} khol raha hun…` : `Sure — opening ${nm}…`, label: sayLine('open_url', { url }, lang)[0], kind: 'globe', step: ++stepNo });
