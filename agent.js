@@ -542,7 +542,7 @@ export async function runAgent(ctx, task, opts = {}) {
       contents.push({ role: 'model', parts });
       const calls = parts.filter(p => p.functionCall);
       const fresh = []; // messages the user sent while we work (cloud chat inbox)
-      if (pendingAck) { const said = parts.map(p => p.text || '').join('').replace(/\s+/g, ' ').trim(); if (said && calls.length) { pendingAck = false; await progress({ ack: clip(said, 200), step: stepNo }); } else if (!calls.length) pendingAck = false; }
+      if (pendingAck) { const said = parts.map(p => p.text || '').join('').replace(/\s+/g, ' ').trim(); pendingAck = false; if (said && calls.length) await progress({ ack: clip(said, 200), step: stepNo }); else if (calls.length) await progress({ ack: lang === 'hi' ? 'Theek hai, ye bhi dhyan mein rakh ke kar raha hun.' : 'Got it — adding that in.', step: stepNo }); }
       if (ctx.cancelled) { result = { success: false, result: 'Stopped by you.' }; break; }
       if (!calls.length && (ctx.inbox || []).length) { continue; } // a new message arrived while the model answered: read it first
       if (!calls.length) {
