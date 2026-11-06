@@ -25,14 +25,19 @@ export const TOOLS = [
   { name: 'write_file', description: 'Create or overwrite a text file in the work folder (code, html, json, md…). path is relative, e.g. "game/index.html". Write COMPLETE files, never placeholders. Big files (more than ~150 lines): write them in parts — the first call creates the file, the next calls use append=true with the following part (each part ≤ ~150 lines), in order. Long single calls get cut off by the AI provider.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, append: { type: 'boolean' } }, required: ['path', 'content'] } },
   { name: 'read_file', description: 'Read a text file from the work folder (first 20000 chars), or list a folder when path ends with "/".', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
   { name: 'run_code', description: 'Run code on the cloud computer (Linux, Python 3, Node 20, Java 17, Android SDK, Gradle; internet on; pip install --user / npm i allowed; no sudo). Use for builds, tests, data work, image/video editing (Pillow, ffmpeg). Files saved at the TOP LEVEL of the work folder come back to the user as files. Input images are in ./inputs/<image_id>.<ext>.', parameters: { type: 'object', properties: { language: { type: 'string', enum: ['python', 'node', 'bash'] }, code: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['language', 'code'] } },
-  { name: 'install_packages', description: 'Install Ubuntu (apt) packages on the cloud computer, e.g. ["ffmpeg","imagemagick"]. pip/npm packages: install them inside run_code instead.', parameters: { type: 'object', properties: { apt: { type: 'array', items: { type: 'string' } } }, required: ['apt'] } },
+  { name: 'install_packages', description: 'Install tools on the cloud computer and REMEMBER them for next time (auto-reinstalled on a fresh machine): apt (Ubuntu packages, e.g. ["ffmpeg","imagemagick"]), pip (Python libs, e.g. ["faster-whisper","yt-dlp"]), npm (Node CLIs). Check with shell "which x" first.', parameters: { type: 'object', properties: { apt: { type: 'array', items: { type: 'string' } }, pip: { type: 'array', items: { type: 'string' } }, npm: { type: 'array', items: { type: 'string' } } } } },
+  { name: 'shell', description: 'Run a bash command in the user\'s PERSISTENT workspace on the cloud computer (files stay between chats; ~/.local/bin is on PATH). Use it for anything: ffmpeg, yt-dlp, ImageMagick, python/node scripts, git, curl, unzip. No sudo (use install_packages). New files at the TOP LEVEL of the workspace reach the user as file cards. Attached files are in ./inputs/.', parameters: { type: 'object', properties: { command: { type: 'string' }, timeout_sec: { type: 'integer' } }, required: ['command'] } },
+  { name: 'edit_file', description: 'Replace one exact piece of text in a workspace file (old_text must appear exactly once). Use for small fixes instead of rewriting the whole file.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_text: { type: 'string' }, new_text: { type: 'string' } }, required: ['path', 'old_text', 'new_text'] } },
+  { name: 'send_file', description: 'Send a workspace file (video, image, audio, zip, pdf, apk, txt…) to the user as a card in the chat.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+  { name: 'save_skill', description: 'Remember a reusable recipe ("skill") in the user\'s workspace so next time you can do it fast: when the user says "ye skill yaad rakho" / "remember how to do this", or after you worked out a non-obvious multi-step method that worked. steps = numbered, concrete commands/settings that worked (no secrets).', parameters: { type: 'object', properties: { name: { type: 'string', description: 'short-kebab-name' }, description: { type: 'string', description: 'one line: what it does' }, steps: { type: 'string' } }, required: ['name', 'description', 'steps'] } },
+  { name: 'load_skill', description: 'Load a saved skill (recipe) by name before doing that kind of task.', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
   { name: 'test_web_app', description: 'SELF-TEST a web app/game you built: opens it in headless Chromium on a phone screen (412x915, touch), presses start, swipes/taps, takes screenshots over ~10 s, records JS errors, alert() calls and how much of the screen the game uses, then a vision reviewer critiques it against the quality checklist. Use after every build and after every fix (at least 2 rounds for games). path = html file in the work folder.', parameters: { type: 'object', properties: { path: { type: 'string' }, focus: { type: 'string', description: 'what to look at this round' } }, required: ['path'] } },
   { name: 'spawn_agents', description: 'Run several sub-agents AT THE SAME TIME, each on one independent part of the job, each working in its own TAB of the one cloud browser the user watches. "5 browser kholo, har ek me ye karo" → exactly 5 tasks with browser=true. Research / compare / check several shops, sites or topics → split it yourself into as many agents as the job needs (no fixed limit; tabs beyond the machine RAM simply queue). Each has web_search/read_url and, when browser=true, its own browser tab. They return short summaries; you then merge them into one answer. task = complete self-contained instructions for that part; title = 2–4 words.', parameters: { type: 'object', properties: { tasks: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, task: { type: 'string' }, browser: { type: 'boolean' } }, required: ['task'] } } }, required: ['tasks'] } },
   { name: 'download_file', description: 'Download a file or a public video the user asked for (YouTube/Shorts, Instagram, X, Vimeo, Facebook, Reddit pages via yt-dlp; direct file links via HTTP) into the work folder; it is sent back to the user automatically as a file in the chat. url = the exact video page or file link (find it first). name = optional file name like "zach-king-short.mp4". Max ~24 MB (videos are fetched at ≤720p).', parameters: { type: 'object', properties: { url: { type: 'string' }, name: { type: 'string' } }, required: ['url'] } },
   { name: 'open_tabs', description: 'Open several web pages at once, each in a new tab of the cloud browser the user watches (e.g. "10 tabs mein Pinterest kholo" → 10 urls). Fast: no sub-agents. Returns each tab title. Use spawn_agents instead when every tab needs real work.', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } },
   { name: 'finish', description: 'The task is done (or truly impossible). result = the final short answer for the user in their language.', parameters: { type: 'object', properties: { result: { type: 'string' }, success: { type: 'boolean' } }, required: ['result', 'success'] } },
 ];
-const RUNNER_ONLY = ['run_code', 'install_packages', 'write_file', 'read_file', 'test_web_app'];
+const RUNNER_ONLY = ['run_code', 'install_packages', 'write_file', 'read_file', 'test_web_app', 'shell', 'edit_file', 'send_file', 'save_skill', 'load_skill'];
 const BROWSER = ['open_tabs', 'open_url', 'list_elements', 'click_element', 'type_into', 'select_option', 'scroll_page', 'read_page', 'look_at_screen', 'sign_in', 'upload_image'];
 
 const MARK_JS = `(() => {
@@ -110,6 +115,17 @@ const JOB_TIPS = `CLOUD COMPUTER: you have a full Ubuntu machine: write_file/rea
 - Deliverables (apk, zip, pdf, images, video, html) MUST be at the top level of the work folder; zip source code (zip -r project.zip project) when you wrote code.
 - Finish with a short Hinglish summary: what you built, how to use it, anything that did not work.`;
 
+// v5.3: self-handling + workspace + skills (playbook-style prompting instead of "training")
+const SELF_RULES = `SELF-HANDLING (never get stuck):
+- A site that does not load (timeout, net::ERR_*, "BLOCKED" in a tool result), a captcha / "verify you are human" / Access denied page, or a region ban: retry ONCE, then switch to an alternative (another site with the same content, read_url, web_search, the site's mobile/m. version, an official API/RSS), or tell the user in ONE clear line what is blocked and ask what to do. Never retry the same failing thing more than twice. The cloud computer is in the USA: sites banned in India (TikTok…) open here.
+- A tool error: read it, fix the cause (missing package → install_packages; wrong path → read_file/ls), try again. After 3 failed attempts at one sub-step, choose another way or explain.
+- Every job ends with a result or a precise reason. Never end silently, never claim success without proof.`;
+const WS_RULES = `WORKSPACE: shell/read_file/write_file/edit_file work in the user's PERSISTENT cloud workspace (kept between chats). Tools you install with install_packages are remembered. Deliverables go to the TOP LEVEL (they arrive as cards) or use send_file. Before a job type you have a skill for, load_skill it and follow it. After learning a new reliable method (or when the user says "ye skill yaad rakho"), save_skill it. Report progress only through your work; the user sees one-line cards for installs, commands and files automatically.`;
+function wsBlock(ctx) {
+  if (!ctx.ws) return ''; let w; try { w = ctx.ws(); } catch { return ''; }
+  const ins = w.installs || {}; const insl = [...(ins.apt || []), ...(ins.pip || []).map(x => 'pip:' + x), ...(ins.npm || []).map(x => 'npm:' + x)];
+  return `\n${WS_RULES}\nWorkspace now: ${w.top.length ? w.top.join(', ') : '(empty)'}${w.inputs.length ? '\nAttached/inputs: ' + w.inputs.join(', ') : ''}${insl.length ? '\nRemembered installs: ' + insl.join(', ') : ''}\nSkills: ${(w.skills || []).map(k => k.name + ' — ' + k.description).join(' | ') || 'none'}`;
+}
 const isBuild = (t) => /\b(game|games|app|apk|website|web ?site|webpage|landing page|html|ui|dashboard|calculator|todo|portfolio|khel|banao|bana do|build|code|script|program|bot)\b/i.test(t);
 const isGame = (t) => /\b(game|games|khel|runner|shooter|puzzle|arcade|snake|flappy|tetris|racing|platformer)\b/i.test(t);
 export const isCodeTask = (t) => /\b(code|coding|program|script|function|bug|debug|fix|refactor|app|apk|game|website|html|css|javascript|python|java|kotlin|react|api|build|compile|gradle)\b/i.test(t);
@@ -127,7 +143,8 @@ ${opts.chat ? 'BEFORE YOUR FIRST TOOL CALL write ONE short line (max 12 words, u
 Saved logins you can use with sign_in: ${lg}. If the task needs a site whose login is not in this list (and Google is not usable for it), do not guess: say exactly "<site> ka login cloud mein share nahi hai. JANUS → Settings → Cloud → Logins mein Share dabao." Saved browser cookies may already keep you logged in, so open the site first and check.
 If a site needs an OTP/captcha/approval you cannot do, stop and say what is needed.
 ${opts.chat ? 'When done, reply with the final answer as plain text (or call finish). Keep it short: the result, plus files/links if any.' : 'Never stop silently: every reply must call a tool, and the last one must be finish(result) in the user\'s language.'}
-${SITE_TIPS}${GOOGLE_TIP}${opts.job || opts.chat ? '\n' + JOB_TIPS : ''}${isBuild(task) ? '\n' + GAME_PLAYBOOK + '\n' + SELFTEST : ''}
+${SELF_RULES}
+${SITE_TIPS}${GOOGLE_TIP}${opts.job || opts.chat ? '\n' + JOB_TIPS : ''}${opts.wsBlock || ''}${isBuild(task) ? '\n' + GAME_PLAYBOOK + '\n' + SELFTEST : ''}
 ${opts.chat ? '' : 'TASK: ' + task}`;
 }
 
@@ -187,7 +204,16 @@ export function pageTools(ctx, getPage0, info) {
   const getPage = async () => { const p = await getPage0(); markActive(ctx, p); return p; };
   const el = async (id) => { const p = await getPage(); const h = await p.$(`[data-jn="${id}"]`); if (!h) throw new Error('element ' + id + ' not found; call list_elements'); return h; };
   return {
-    open_url: async ({ url }) => { const p = await getPage(); await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }); await settle(p); return 'Title: ' + (await p.title()) + '\nURL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
+    open_url: async ({ url }) => { // v5.3: blocked / unreachable / captcha pages are detected and reported clearly (retry once)
+      const p = await getPage(); let err = '';
+      for (let k = 0; k < 2; k++) { try { const r = await p.goto(url, { waitUntil: 'domcontentloaded', timeout: k ? 20000 : 30000 }); err = r && r.status() >= 400 ? 'HTTP ' + r.status() : ''; break; } catch (e) { err = String(e && e.message || e).replace(/\s+at .*/s, '').slice(0, 120); if (/ERR_NAME_NOT_RESOLVED|ERR_INVALID_URL/.test(err)) break; } }
+      if (err && !/^HTTP/.test(err)) return 'BLOCKED: ' + host(url) + ' did not load (' + err + ') even after a retry. Use an alternative (another site, read_url, web_search, the m. version) or tell the user in one line and ask.';
+      await settle(p); const ti = await p.title().catch(() => '');
+      const body = await p.evaluate(() => (document.body && document.body.innerText || '').slice(0, 1500)).catch(() => '');
+      const wall = /captcha|verify you are (a )?human|are you a robot|unusual traffic|just a moment\.\.\.|access denied|attention required|request blocked|not available in your (country|region)/i.exec(ti + ' ' + body);
+      const warn = (err ? 'WARNING: the site answered ' + err + '. ' : '') + (wall ? 'WARNING: this page shows a block/captcha ("' + wall[0] + '"). Do not loop on it: wait 5 s and reload once, else use an alternative or tell the user in one line.\n' : '');
+      return warn + 'Title: ' + ti + '\nURL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS));
+    },
     list_elements: async () => { const p = await getPage(); return 'URL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
     click_element: async ({ element_id }) => { const h = await el(element_id); const p = await getPage(); await h.evaluate(e => e.scrollIntoView({ block: 'center' })); await h.click(); await settle(p); return 'clicked. URL: ' + p.url() + '\n' + (await p.evaluate(MARK_JS)); },
     type_into: async ({ element_id, text, press_enter }) => {
@@ -452,21 +478,39 @@ export async function runAgent(ctx, task, opts = {}) {
     download_file: async ({ url, name }) => {
       if (!ctx.download) return 'download_file needs the cloud computer (GitHub runner); not available here.';
       const r = await ctx.download(String(url || ''), String(name || ''));
-      if (r.file) { if (r.file.mime && r.file.mime.startsWith('image/')) images.push(r.file.id); else files.push(r.file.id); }
+      if (r.file) { if (r.file.mime && r.file.mime.startsWith('image/')) images.push(r.file.id); else files.push(r.file.id); card(H((r.file.name || 'file') + ' download ki', 'Downloaded ' + (r.file.name || 'the file')), 'down'); }
       return r.msg;
     },
     run_code: async ({ language, code, timeout_sec }) => {
       if (!ctx.runCode) return 'run_code is not available on this runner (only on the GitHub runner).';
       const r = await ctx.runCode(language, String(code || ''), Math.min(Math.max(+timeout_sec || 120, 10), ctx.maxCodeSecs || 600), images);
       for (const f of r.files || []) { if (f.mime.startsWith('image/')) images.push(f.id); else files.push(f.id); }
+      if (r.files && r.files.length) card(H(r.files.map(f => f.name).join(', ') + ' bana di', r.files.map(f => f.name).join(', ') + ' ready'), 'file');
       return 'exit ' + r.code + '\n' + clip(r.out || '', 5000) + (r.files && r.files.length ? '\nFILES: ' + r.files.map(f => f.name + ' → ' + f.id + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
     },
-    install_packages: async ({ apt }) => {
+    install_packages: async ({ apt, pip, npm }) => {
       if (!ctx.install) return 'Installing packages is only possible on the GitHub runner.';
-      const names = (Array.isArray(apt) ? apt : [apt]).map(String).filter(n => /^[a-z0-9][a-z0-9+.\-]{0,80}$/.test(n)).slice(0, 30);
-      if (!names.length) return 'No valid package names.';
-      return await ctx.install(names);
+      const arr = (x) => (Array.isArray(x) ? x : x ? [x] : []).map(String);
+      const names = arr(apt).filter(n => /^[a-z0-9][a-z0-9+.\-]{0,80}$/.test(n)).slice(0, 30);
+      const pipL = arr(pip).filter(n => /^[A-Za-z0-9][A-Za-z0-9_.\-\[\]=<>~!,]{0,100}$/.test(n)).slice(0, 30);
+      const npmL = arr(npm).filter(n => /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(@[\w.\-^~]+)?$/.test(n)).slice(0, 20);
+      if (!names.length && !pipL.length && !npmL.length) return 'No valid package names.';
+      const out = await ctx.install(names, { pip: pipL, npm: npmL });
+      const okNames = [...names, ...pipL, ...npmL].filter(n => new RegExp('installed[^\\n]*' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(out));
+      card(okNames.length ? H(okNames.join(', ') + ' install kiya', 'Installed ' + okNames.join(', ')) : H('Install fail hua', 'Install failed'), okNames.length ? 'down' : 'bad');
+      return out;
     },
+    shell: async ({ command, timeout_sec }) => {
+      if (!ctx.shell) return 'shell is only available on the cloud computer.';
+      const r = await ctx.shell(String(command || ''), Math.min(Math.max(+timeout_sec || 300, 10), ctx.maxCodeSecs || 600));
+      for (const f of r.files || []) { if (f.mime.startsWith('image/')) images.push(f.id); else files.push(f.id); }
+      card(r.code === 0 ? (r.files && r.files.length ? H(r.files.map(f => f.name).join(', ') + ' bana di', r.files.map(f => f.name).join(', ') + ' ready') : cmdLine(command)) : H('Command fail hua (exit ' + r.code + ')', 'Command failed (exit ' + r.code + ')'), r.code === 0 ? (r.files && r.files.length ? 'file' : 'ok') : 'bad');
+      return 'exit ' + r.code + '\n' + clip(r.out || '', 6000) + (r.files && r.files.length ? '\nFILES SENT: ' + r.files.map(f => f.name + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
+    },
+    edit_file: async ({ path, old_text, new_text }) => { if (!ctx.fsx) return 'edit_file is only available on the cloud computer.'; return ctx.fsx.edit(String(path || ''), old_text, new_text); },
+    send_file: async ({ path }) => { if (!ctx.fsx) return 'send_file is only available on the cloud computer.'; const r = ctx.fsx.send(String(path || '')); if (r.file) { if (r.file.mime.startsWith('image/')) images.push(r.file.id); else files.push(r.file.id); card(H(r.file.name + ' bhej di', r.file.name + ' sent'), 'file'); } return r.msg; },
+    save_skill: async ({ name, description, steps: st }) => { if (!ctx.skills) return 'skills are only available on the cloud computer.'; const n = ctx.skills.save(name, description, st); card(H('Skill yaad kar li: ' + n, 'Skill saved: ' + n), 'skill'); return 'Saved skill ' + n + ' (kept in the workspace).'; },
+    load_skill: async ({ name }) => { if (!ctx.skills) return 'skills are only available on the cloud computer.'; const k = ctx.skills.get(name); if (!k) return 'No skill named ' + name + '. Skills: ' + ctx.skills.list().map(x => x.name).join(', '); card(H('Skill use kar raha hun: ' + k.name, 'Using skill: ' + k.name), 'skill'); return k.description + '\n' + k.body; },
     write_file: async ({ path, content, append }) => { if (!ctx.fs) return 'write_file is only available on the cloud computer.'; const r = await ctx.fs.write(String(path || ''), String(content ?? ''), !!append); if (r.file) files.push(r.file.id); return r.msg; },
     read_file: async ({ path }) => { if (!ctx.fs) return 'read_file is only available on the cloud computer.'; return clip(await ctx.fs.read(String(path || '')), 20000); },
     test_web_app: async ({ path, focus }) => {
@@ -479,13 +523,17 @@ export async function runAgent(ctx, task, opts = {}) {
     },
   };
 
+  for (const t of (ctx.mcpTools || [])) impl[t.name] = async (a) => { const out = await ctx.mcpCall(t.name, a || {}); card(H(t.name.replace(/^mcp_/, '').replace(/_/, ': ') + ' ✓', t.name.replace(/^mcp_/, '').replace(/_/, ': ') + ' ✓'), /^MCP error|^TOOL ERROR/.test(out) ? 'bad' : 'mcp'); return out; };
   const lang = isHing(task + ' ' + ((opts.chat && opts.chat.history || []).filter(m => m.role === 'user').slice(-2).map(m => m.text).join(' '))) ? 'hi' : 'en';
   const label0 = (name, a) => ({ web_search: 'Searching “' + clip(a.query || '', 40) + '”', read_url: 'Reading ' + host(a.url), generate_image: 'Creating an image', open_url: 'Opening ' + host(a.url), list_elements: 'Reading the page', click_element: 'Clicking', type_into: 'Typing', select_option: 'Choosing an option', scroll_page: 'Scrolling', read_page: 'Reading the page', look_at_screen: 'Looking at the page', sign_in: 'Signing in', upload_image: 'Uploading', write_file: 'Writing ' + clip(String(a.path || 'a file'), 40), read_file: 'Reading ' + clip(String(a.path || 'a file'), 40), spawn_agents: 'Starting parallel agents', run_code: 'Running code', install_packages: 'Installing tools', test_web_app: 'Testing on a phone screen', finish: 'Checking the result' })[name] || 'Working';
+  const H = (a, b) => (lang === 'hi' ? a : b);
+  const card = (t, k) => { if (ctx.card) { try { ctx.card(t, k); } catch { } } }; // v5.3: one-line tool card in the chat
+  const cmdLine = (c) => { const w = String(c || '').trim().replace(/^(sudo|cd [^&;]+(&&|;))\s*/, '').split(/\s+/)[0].split('/').pop() || 'command'; return H(w + ' chala diya ✓', 'Ran ' + w + ' ✓'); };
   const label = (name, a) => sayLine(name, a, lang)[0]; const kindOf = (name, a) => sayLine(name, a, lang)[1];
   const t0 = ctx.now(); let stepNo = opts.state ? (opts.state.stepNo || 0) : 0; let lastShot = null; const tests = []; let lastShotAt = 0;
   const progress = async (info) => { if (!ctx.progress) return null; try { return await ctx.progress(info); } catch { return null; } };
   const loginSites = ctx.logins.list ? await ctx.logins.list() : [];
-  const system = sysPrompt(task, new Date(ctx.now()).toISOString(), loginSites, opts);
+  const system = sysPrompt(task, new Date(ctx.now()).toISOString(), loginSites, { ...opts, wsBlock: ctx.runCode ? wsBlock(ctx) : '' });
   const route = opts.route || ((isCodeTask(task) || isBuild(task)) && (opts.job || opts.chat) ? 'code' : classifyTask(task, {}) === 'fast' ? 'main' : classifyTask(task, {})); // v5.1: strongest model for the task type
   let contents;
   if (opts.state && Array.isArray(opts.state.contents)) {
@@ -496,13 +544,13 @@ export async function runAgent(ctx, task, opts = {}) {
     contents = [];
     for (const m of (opts.chat.history || []).slice(-24)) { const t = clip(String(m.text || ''), 6000); if (!t) continue; contents.push({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: t }] }); }
     while (contents.length && contents[0].role !== 'user') contents.shift();
-    const parts = [{ text: (task || 'See the attached image.') + (openBefore && !/^about:/.test(openBefore) ? '\n\n[The browser from before is still open on: ' + openBefore + ' (' + ((ctx.tabs || []).filter(t => t.page).length) + ' open tabs). If this message continues that, keep working there (list_elements first).]' : '') }]; for (const im of (opts.chat.images || []).slice(0, 4)) parts.push({ inlineData: { mimeType: im.mime || 'image/jpeg', data: im.b64 } });
+    const parts = [{ text: (task || 'See the attached image.') + ((ctx.attached || []).length ? '\n\n[Attached files, already in your workspace: ' + ctx.attached.join(', ') + ']' : '') + (openBefore && !/^about:/.test(openBefore) ? '\n\n[The browser from before is still open on: ' + openBefore + ' (' + ((ctx.tabs || []).filter(t => t.page).length) + ' open tabs). If this message continues that, keep working there (list_elements first).]' : '') }]; for (const im of (opts.chat.images || []).slice(0, 4)) parts.push({ inlineData: { mimeType: im.mime || 'image/jpeg', data: im.b64 } });
     if (contents.length && contents[contents.length - 1].role === 'user') contents.push({ role: 'model', parts: [{ text: '…' }] });
     contents.push({ role: 'user', parts });
   } else contents = [{ role: 'user', parts: [{ text: 'Do the task now.' }] }];
   const hasImg = contents.some(c => (c.parts || []).some(p => p.inlineData));
   let result = null, nudges = 0, checks = 0, cont = null, cutHint = false, hintNow = false, llmFails = 0, introSent = !!opts.state;
-  const tools = TOOLS.filter(t => (ctx.runCode || !RUNNER_ONLY.includes(t.name)) && (t.name !== 'write_file' || ctx.fs) && (t.name !== 'test_web_app' || ctx.testWebApp));
+  const tools = TOOLS.filter(t => (ctx.runCode || !RUNNER_ONLY.includes(t.name)) && (t.name !== 'write_file' || ctx.fs) && (t.name !== 'test_web_app' || ctx.testWebApp)).concat(ctx.mcpTools || []);
   // v5.2 main-agent inbox: every message the user sends while we work is read before the next step
   let pendingAck = false;
   const takeInbox = () => { const l = (ctx.inbox || []).splice(0); return l.filter(x => String(x || '').trim()); };
@@ -512,6 +560,9 @@ export async function runAgent(ctx, task, opts = {}) {
     pendingAck = true; steps.push({ tool: 'inbox', args: {}, out: clip(l.join(' | '), 200) });
   };
   const waitIfPaused = async () => { let n = 0; while (ctx.pausedUntil && ctx.pausedUntil > ctx.now() && !ctx.cancelled && n++ < 600) { if (n === 1) await progress({ label: lang === 'hi' ? 'Aap browser chala rahe ho — ruka hua hun' : 'You are using the browser — paused', kind: 'eye', step: stepNo }); await new Promise(z => setTimeout(z, 500)); } };
+  // v5.3: tap on an expired browser card → reopen the same pages (no model)
+  { const ro = opts.chat && !opts.state && ctx.browser ? /^Open again: (.+)$/s.exec(String(task || '')) : null;
+    if (ro) { const urls = ro[1].split(/\s+/).filter(u => /^https?:\/\//.test(u)).slice(0, 10); try { const out = await openTabs(ctx, urls, lang, (i) => progress({ ...i, step: stepNo })); if (ctx.snapNow) { try { await ctx.snapNow(); } catch { } } return { success: true, result: lang === 'hi' ? 'Browser dobara khul gaya ✓' : 'Browser reconnected ✓', steps: [{ tool: 'open_tabs', args: { n: urls.length }, out: clip(out, 300) }], images, files, keepTabs: true, model: 'instant', silent: true }; } catch (e) { return { success: false, result: 'Reconnect failed: ' + clip(String(e && e.message || e), 80), steps, images, files }; } } }
   // v5.2 instant path: "Pinterest kholo" needs no model at all
   if (opts.chat && !opts.state && ctx.browser && isJustOpen(task) && tabCount(task) && !(opts.chat.images || []).length) { // "10 tabs mein Pinterest kholo"
     const url = guessUrl(task); const nm = siteName(url); const n = tabCount(task);
