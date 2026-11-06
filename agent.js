@@ -112,7 +112,8 @@ const SELFTEST = `SELF-TEST LOOP (mandatory for anything visual you build: games
 
 const JOB_TIPS = `CLOUD COMPUTER: you have a full Ubuntu machine: write_file/read_file, run_code (bash/python/node, up to ~50 min per call), install_packages (apt), internet, Java 17 (JAVA_HOME), Android SDK (ANDROID_HOME, platforms + build-tools), Gradle, Python 3, Node 20, headless Chromium (test_web_app). Work like a senior engineer: plan, write files, run, read errors, fix, repeat until it truly works.
 - Android app: complete Gradle project (AGP + Gradle wrapper or a pinned distribution), ./gradlew assembleDebug --no-daemon, then COPY the .apk to the TOP LEVEL of the work folder (cp app/build/outputs/apk/debug/app-debug.apk ./MyApp.apk). For a game, a WebView wrapper around your tested index.html (fullscreen, portrait, immersive) is fine and fast.
-- Deliverables (apk, zip, pdf, images, video, html) MUST be at the top level of the work folder; zip source code (zip -r project.zip project) when you wrote code.
+- Deliverables (apk, zip, pdf, images, video, html) MUST be at the top level of the work folder (and ONLY deliverables: put temporary files like music.m4a, captions.srt, frames in a subfolder such as tmp/); zip source code (zip -r project.zip project) when you wrote code.
+- Once the requested file is sent (send_file) and you checked it ONCE, call finish right away. Do not keep re-checking, rebuilding or re-sending it.
 - Finish with a short Hinglish summary: what you built, how to use it, anything that did not work.`;
 
 // v5.3: self-handling + workspace + skills (playbook-style prompting instead of "training")
@@ -510,7 +511,8 @@ export async function runAgent(ctx, task, opts = {}) {
       if (!ctx.shell) return 'shell is only available on the cloud computer.';
       const r = await ctx.shell(String(command || ''), Math.min(Math.max(+timeout_sec || 300, 10), ctx.maxCodeSecs || 600));
       for (const f of r.files || []) { if (f.mime.startsWith('image/')) images.push(f.id); else files.push(f.id); }
-      card(r.code === 0 ? (r.files && r.files.length ? H(r.files.map(f => f.name).join(', ') + ' bana di', r.files.map(f => f.name).join(', ') + ' ready') : cmdLine(command)) : H('Command fail hua (exit ' + r.code + ')', 'Command failed (exit ' + r.code + ')'), r.code === 0 ? (r.files && r.files.length ? 'file' : 'ok') : 'bad');
+      const w0 = String(command || '').trim().replace(/^(cd [^&;]+(&&|;)\s*)+/, '').split(/\s+/)[0].split('/').pop();
+      if (!(r.code === 0 && !(r.files && r.files.length) && TRIVIAL.test(w0))) card(r.code === 0 ? (r.files && r.files.length ? H(r.files.map(f => f.name).join(', ') + ' bana di', r.files.map(f => f.name).join(', ') + ' ready') : cmdLine(command)) : H('Command fail hua (exit ' + r.code + ')', 'Command failed (exit ' + r.code + ')'), r.code === 0 ? (r.files && r.files.length ? 'file' : 'ok') : 'bad');
       return 'exit ' + r.code + '\n' + clip(r.out || '', 6000) + (r.files && r.files.length ? '\nFILES SENT: ' + r.files.map(f => f.name + ' (' + f.mime + ', ' + f.bytes + ' bytes)').join(', ') : '');
     },
     edit_file: async ({ path, old_text, new_text }) => { if (!ctx.fsx) return 'edit_file is only available on the cloud computer.'; return ctx.fsx.edit(String(path || ''), old_text, new_text); },
@@ -534,6 +536,7 @@ export async function runAgent(ctx, task, opts = {}) {
   const label0 = (name, a) => ({ web_search: 'Searching “' + clip(a.query || '', 40) + '”', read_url: 'Reading ' + host(a.url), generate_image: 'Creating an image', open_url: 'Opening ' + host(a.url), list_elements: 'Reading the page', click_element: 'Clicking', type_into: 'Typing', select_option: 'Choosing an option', scroll_page: 'Scrolling', read_page: 'Reading the page', look_at_screen: 'Looking at the page', sign_in: 'Signing in', upload_image: 'Uploading', write_file: 'Writing ' + clip(String(a.path || 'a file'), 40), read_file: 'Reading ' + clip(String(a.path || 'a file'), 40), spawn_agents: 'Starting parallel agents', run_code: 'Running code', install_packages: 'Installing tools', test_web_app: 'Testing on a phone screen', finish: 'Checking the result' })[name] || 'Working';
   const H = (a, b) => (lang === 'hi' ? a : b);
   const card = (t, k) => { if (ctx.card) { try { ctx.card(t, k); } catch { } } }; // v5.3: one-line tool card in the chat
+  const TRIVIAL = /^(ls|cat|echo|rm|mkdir|cd|pwd|which|head|tail|cp|mv|chmod|test|true|printf|wc|du|stat|file|find|sleep)$/;
   const cmdLine = (c) => { const w = String(c || '').trim().replace(/^(sudo|cd [^&;]+(&&|;))\s*/, '').split(/\s+/)[0].split('/').pop() || 'command'; return H(w + ' chala diya ✓', 'Ran ' + w + ' ✓'); };
   const label = (name, a) => sayLine(name, a, lang)[0]; const kindOf = (name, a) => sayLine(name, a, lang)[1];
   const t0 = ctx.now(); let stepNo = opts.state ? (opts.state.stepNo || 0) : 0; let lastShot = null; const tests = []; let lastShotAt = 0;
@@ -556,6 +559,7 @@ export async function runAgent(ctx, task, opts = {}) {
   } else contents = [{ role: 'user', parts: [{ text: 'Do the task now.' }] }];
   const hasImg = contents.some(c => (c.parts || []).some(p => p.inlineData));
   let result = null, nudges = 0, checks = 0, cont = null, cutHint = false, hintNow = false, llmFails = 0, introSent = !!opts.state;
+  let delivered = false, afterDel = 0; // v5.3: stop once the requested file is delivered (+ verified once)
   const tools = TOOLS.filter(t => (ctx.runCode || !RUNNER_ONLY.includes(t.name)) && (t.name !== 'write_file' || ctx.fs) && (t.name !== 'test_web_app' || ctx.testWebApp)).concat(ctx.mcpTools || []);
   // v5.2 main-agent inbox: every message the user sends while we work is read before the next step
   let pendingAck = false;
@@ -618,7 +622,7 @@ export async function runAgent(ctx, task, opts = {}) {
         const t = parts.map(p => p.text || '').join('').trim();
         if (opts.chat && t) {
           const acted = steps.some(s => BROWSER.includes(s.tool) || ['run_code', 'write_file', 'upload_image', 'install_packages'].includes(s.tool));
-          if (acted && checks < 2) { const v = await verify(ctx, task, steps, t, tests); if (!v.ok) { checks++; steps.push({ tool: 'checker', args: {}, out: clip('rejected: ' + v.reason, 200) }); contents.push({ role: 'user', parts: [{ text: 'CHECKER: not done yet — ' + v.reason + '. Do the missing part now, or reply honestly with what could not be done.' }] }); continue; } }
+          if (acted && checks < 2 && !(delivered && checks >= 1)) { const v = await verify(ctx, task, steps, t, tests); if (!v.ok) { checks++; steps.push({ tool: 'checker', args: {}, out: clip('rejected: ' + v.reason, 200) }); contents.push({ role: 'user', parts: [{ text: 'CHECKER: not done yet — ' + v.reason + '. Do the missing part now, or reply honestly with what could not be done.' }] }); continue; } }
           result = { success: true, result: t }; break;
         }
         if (nudges < 2) { nudges++; contents.push({ role: 'user', parts: [{ text: 'Continue the task now: call the next tool. When fully done (or truly impossible), call finish with the result' + (t ? '' : ' and the exact reason') + '.' }] }); continue; }
@@ -633,11 +637,12 @@ export async function runAgent(ctx, task, opts = {}) {
         const { name, args = {} } = c.functionCall;
         if (name === 'finish') {
           const claim = { success: args.success !== false, result: String(args.result || '') };
-          if (claim.success && checks < 2) {
+          if (claim.success && delivered && checks >= 1) { /* deliverable sent and already checked once: accept */ }
+          else if (claim.success && checks < 2) {
             await progress({ label: label('finish', {}), kind: 'ok', step: stepNo });
             const v = await verify(ctx, task, steps, claim.result, tests);
             if (!v.ok) { checks++; outs.push({ functionResponse: { name, response: { result: 'NOT ACCEPTED by checker: ' + v.reason + '. The task is not done yet. Do the missing step now, or finish(success=false) with the exact reason.' } } }); steps.push({ tool: 'checker', args: {}, out: clip('rejected: ' + v.reason, 200) }); continue; }
-          } else if (claim.success && checks >= 2) { const v = await verify(ctx, task, steps, claim.result, tests); if (!v.ok) { claim.success = false; claim.result = claim.result + '\n\n⚠ Poora verify nahi ho paya: ' + v.reason; } }
+          } else if (claim.success && checks >= 2 && !delivered) { const v = await verify(ctx, task, steps, claim.result, tests); if (!v.ok) { claim.success = false; claim.result = claim.result + '\n\n⚠ Poora verify nahi ho paya: ' + v.reason; } }
           result = claim; break;
         }
         stepNo++;
@@ -645,10 +650,11 @@ export async function runAgent(ctx, task, opts = {}) {
         const pr = await progress({ label: label(name, args), kind: kindOf(name, args), step: stepNo, tool: name });
         if ((pr && pr.cancel) || ctx.cancelled) { result = { success: false, result: 'Stopped by you.' }; break; }
         if (pr && pr.inbox && pr.inbox.length && !ctx.inboxHandled) fresh.push(...pr.inbox);
-        let out, img = null;
+        let out, img = null; const nDel = files.length + images.length;
         try { const f = impl[name]; if (!f) throw new Error('unknown tool'); out = await f(args); if (out && typeof out === 'object') { img = out.image; out = out.text; } }
         catch (e) { out = 'ERROR: ' + (e && e.message || e); }
         steps.push({ tool: name, args: redact(args), out: clip(String(out), name === 'spawn_agents' ? 1600 : 400) });
+        if (name === 'send_file' && files.length + images.length > nDel) { delivered = true; afterDel = 0; }
         outs.push({ functionResponse: { name, response: { result: clip(String(out), 9000) } } });
         if (img) outs.push({ inlineData: { mimeType: 'image/jpeg', data: img } });
         if (page && BROWSER.includes(name) && name !== 'look_at_screen' && ctx.progress && ctx.now() - lastShotAt > 2500) { // live view for the phone
@@ -657,6 +663,11 @@ export async function runAgent(ctx, task, opts = {}) {
       }
       if (hintNow) { hintNow = false; outs.push({ text: '[JANUS: one of your replies was too long and got cut off by the AI provider. Keep every tool call short from now on: write big files in parts of at most 150 lines (first write_file, then write_file with append=true).]' }); }
       { const l = fresh.concat(takeInbox()); if (l.length && !result) { addInbox(l, outs); await progress({ label: lang === 'hi' ? 'Aapka naya message padh liya' : 'Got your new message', kind: 'spark', step: stepNo }); } }
+      if (delivered && !result && calls.some(c => c.functionCall.name !== 'send_file' && c.functionCall.name !== 'finish')) { // cap self-check loops after delivery
+        afterDel++;
+        if (afterDel === 3) outs.push({ text: '[JANUS: the requested file is already delivered to the user. Do NOT re-check, rebuild or re-send it. Call finish NOW with a short summary.]' });
+        if (afterDel >= 6) { const said = parts.map(p => p.text || '').join('').trim(); result = { success: true, result: said || (lang === 'hi' ? 'File bhej di ✓ (upar card mein hai).' : 'File sent ✓ (see the card above).') }; }
+      }
       if (!result && outs.length) contents.push({ role: 'user', parts: outs });
     }
   } finally {
