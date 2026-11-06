@@ -325,9 +325,15 @@ export function sayLine(name, a = {}, lang = 'en') {
     case 'write_file': return [H(qq(String(a.path || 'file'), 30) + ' likh raha hun', 'Writing ' + qq(String(a.path || 'a file'), 30)), 'type'];
     case 'read_file': return [H('File padh raha hun', 'Reading a file'), 'read'];
     case 'run_code': return [H('Code chala raha hun', 'Running code'), 'spark'];
+    case 'shell': { const w = String(a.command || '').trim().replace(/^(cd [^&;]+(&&|;)\s*)+/, '').split(/\s+/)[0].split('/').pop() || ''; return [w ? H(w + ' chala raha hun', 'Running ' + w) : H('Command chala raha hun', 'Running a command'), 'spark']; }
+    case 'edit_file': return [H(qq(String(a.path || 'file'), 30) + ' badal raha hun', 'Editing ' + qq(String(a.path || 'a file'), 30)), 'type'];
+    case 'send_file': return [H(qq(String(a.path || 'file'), 30) + ' bhej raha hun', 'Sending ' + qq(String(a.path || 'the file'), 30)), 'down'];
+    case 'save_skill': return [H('Skill yaad kar raha hun', 'Saving the skill'), 'spark'];
+    case 'load_skill': return [H('Skill khol raha hun', 'Loading a skill'), 'read'];
     case 'install_packages': return [H('Tools install kar raha hun', 'Installing tools'), 'down'];
     case 'test_web_app': return [H('Phone screen pe test kar raha hun', 'Testing on a phone screen'), 'eye'];
     case 'finish': return [H('Result check kar raha hun', 'Checking the result'), 'ok'];
+    case '_mcp': return [H('Tool chala raha hun', 'Using a tool'), 'spark'];
     case '_start': return [H('Shuru kar raha hun', 'Starting'), 'spark'];
     case '_wait': return [H('AI models busy hain, ek minute', 'AI models are busy, one minute'), 'spark'];
     case '_merge': return [H('Sabke results jod raha hun', 'Putting the results together'), 'agents'];
