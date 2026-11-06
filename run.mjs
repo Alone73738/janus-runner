@@ -8,7 +8,9 @@
 import puppeteer from 'puppeteer-core';
 import { writeFileSync, statSync, readFileSync } from 'node:fs';
 import { runAgent, makeRouter, closeAllTabs } from './agent.js';
-import { CHROME, WD, images, sh, runCode, fs, testWebApp, setLLM, prepChromeExts, download } from './tools.mjs';
+import { CHROME, WD, images, sh, runCode, fs, testWebApp, setLLM, prepChromeExts, download, skills, installs, pipInstall, npmInstall, wsSummary, packHome, fsx } from './tools.mjs';
+import { MCP, mcpText, cleanSchema, toolName } from './mcp.js';
+import { mkdirSync as mkdirS, existsSync as existsS } from 'node:fs';
 import { freemem } from 'node:os';
 
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -43,6 +45,17 @@ async function runJob(pay, jobId, carry) {
     try { const r = await post('/runner/ws', { run: job.run, id: pay.ws }, true); if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); writeFileSync('/tmp/ws.tgz', buf); await sh('tar', ['-xzf', '/tmp/ws.tgz', '-C', WD]); await sh('chmod', ['-R', 'a+rwX', WD]); } } catch { }
   }
   const chat = pay.kind === 'chat';
+  // v5.3: the user's persistent workspace (files, skills, remembered installs) → into the work folder once per runner
+  let replay = Promise.resolve();
+  if (pay.home && pay.home.ts && globalThis.__homeTs !== pay.home.ts && !pay.ws) {
+    try { const r = await post('/runner/blob', { run: job.run, id: 'home' }, true); if (r.ok) { writeFileSync('/tmp/home-in.tgz', Buffer.from(await r.arrayBuffer())); await sh('tar', ['-xzf', '/tmp/home-in.tgz', '-C', WD]); await sh('chmod', ['-R', 'a+rwX', WD]); globalThis.__homeTs = pay.home.ts; globalThis.__homeHash = pay.home.hash; } } catch { }
+    const ins = installs.get(); // reinstall what this user installed before (fresh machine), in the background
+    replay = (async () => { try { if ((ins.apt || []).length) await aptInstall(ins.apt); if ((ins.pip || []).length) await pipInstall(ins.pip); if ((ins.npm || []).length) await npmInstall(ins.npm); } catch { } })();
+  }
+  const attached = [];
+  for (const f of (pay.files || []).slice(0, 6)) { // chat attachments (video/audio/zip…) → ./inputs/<name>
+    try { const r = await post('/runner/blob', { run: job.run, id: f.id }, true); if (!r.ok) continue; mkdirS(WD + '/inputs', { recursive: true }); let nm = String(f.name || f.id).replace(/[^\w.\- ]/g, '_'); writeFileSync(WD + '/inputs/' + nm, Buffer.from(await r.arrayBuffer())); attached.push('inputs/' + nm + ' (' + (f.mime || '?') + ', ' + Math.round((f.size || 0) / 1024) + ' KB)'); } catch { }
+  }
   let ctx = null, liveStop = false, liveP = null, cancelRes = null; const cancelWait = new Promise(r => { cancelRes = r; });
   try {
     const ai = { run: async (model, input) => { const o = await post('/runner/ai', { run: job.run, model, input }); if (!o.ok) throw new Error(o.err); return o.out; } };
@@ -82,16 +95,22 @@ async function runJob(pay, jobId, carry) {
       runCode: async (lang, code, secs, ids) => runCode(lang, code, secs, ids, images),
       maxCodeSecs: pay.long || chat ? 3000 : 600,
       fs, testWebApp, download, memFree: () => freemem(), subPages: 12,
-      install: async (names) => {
-        const run = (args, t) => sh('sudo', ['-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'timeout', String(t), ...args]);
-        if (!globalThis.__aptUpdated) { await run(['apt-get', 'update', '-qq'], 300); globalThis.__aptUpdated = true; }
-        const r = await run(['apt-get', 'install', '-y', '-qq', '--no-install-recommends', ...names], 900);
-        return (r.code === 0 ? 'Installed: ' + names.join(', ') : 'apt exit ' + r.code + '\n' + r.out.slice(-3000));
+      install: async (names, more = {}) => { // apt + pip + npm; remembered in the workspace and replayed on a fresh machine
+        await replay; const out = [];
+        if (names && names.length) { const r = await aptInstall(names); out.push(r.code === 0 ? 'apt: installed ' + names.join(', ') : 'apt exit ' + r.code + '\n' + r.out.slice(-2500)); if (r.code === 0) installs.add('apt', names); }
+        if ((more.pip || []).length) { const r = await pipInstall(more.pip); out.push(r.code === 0 ? 'pip: installed ' + more.pip.join(', ') : 'pip exit ' + r.code + '\n' + r.out.slice(-2500)); if (r.code === 0) installs.add('pip', more.pip); }
+        if ((more.npm || []).length) { const r = await npmInstall(more.npm); out.push(r.code === 0 ? 'npm: installed ' + more.npm.join(', ') : 'npm exit ' + r.code + '\n' + r.out.slice(-2500)); if (r.code === 0) installs.add('npm', more.npm); }
+        return out.join('\n') || 'Nothing to install.';
       },
+      ready: () => replay,
+      shell: async (cmd, secs) => { await replay; return runCode('bash', cmd, secs, [], images); },
+      fsx, skills, ws: wsSummary, attached,
+      card: chat ? async (t, k) => { try { await post('/runner/progress', { run: job.run, job: jobId, card: String(t).slice(0, 90), ck: k || 'ok' }); } catch { } } : null,
+      mcpTools: [], mcpCall: null,
       images: { put: async (bytes, mime) => { const id = 'img_' + rid(); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
       progress: chat ? async (info) => { // status line for the phone (+ Stop / new messages back)
         if (!info.shot && !info.agents && !info.intro && !info.ack && Date.now() - lastP < 700) return null; lastP = Date.now();
-        return handle(await post('/runner/progress', { run: job.run, job: jobId, label: String(info.label || '').slice(0, 80), kind: info.kind || null, intro: info.intro || null, ack: info.ack || null, step: info.step | 0, shot: info.shot || null, agents: info.agents || null }));
+        return handle(await post('/runner/progress', { run: job.run, job: jobId, label: String(info.label || '').slice(0, 80), kind: info.kind || null, intro: info.intro || null, ack: info.ack || null, card: info.card || null, ck: info.ck || null, step: info.step | 0, shot: info.shot || null, agents: info.agents || null }));
       } : undefined,
     };
     // ---------- LIVE: tabs + screenshots out, taps/keys in ----------
@@ -138,6 +157,12 @@ async function runJob(pay, jobId, carry) {
     ctx.snapNow = async () => { forceNow = true; await liveTick(); };
     if (chat) liveP = (async () => { while (!liveStop && !(ctx.session && ctx.session.stop)) { const t0 = Date.now(); try { await liveTick(); } catch { } const iv = ctx.interactive || ctx.inputs.length ? 250 : ctx.watching ? 800 : 2500; const w = iv - (Date.now() - t0); if (w > 0) await Promise.race([sleep(w), new Promise(r => { ctx._wake = r; })]); } })();
     const budgetMs = pay.budgetMs || 320 * 60000; // GitHub job limit is 340 min: hand over to a fresh runner before it
+    // v5.3: MCP servers the user connected → extra tools (mcp_<server>_<tool>)
+    if ((pay.mcp || []).length) {
+      const conns = {}; const map = {};
+      await Promise.all(pay.mcp.slice(0, 8).map(async (sv) => { try { const c = new MCP(sv.url, sv.headers || {}); const tl = await Promise.race([c.tools(), sleep(8000).then(() => { throw new Error('timeout'); })]); conns[sv.name] = c; for (const t of tl.slice(0, 40)) { const n = toolName(sv.name, t.name); map[n] = { sv: sv.name, tool: t.name }; ctx.mcpTools.push({ name: n, description: ('[MCP ' + sv.name + '] ' + String(t.description || t.name)).slice(0, 900), parameters: cleanSchema(t.inputSchema || { type: 'object', properties: {} }) }); } } catch { } }));
+      ctx.mcpCall = async (n, args) => { const m = map[n]; if (!m) return 'unknown MCP tool'; try { return mcpText(await conns[m.sv].call(m.tool, args)); } catch (e) { return 'MCP error: ' + String(e.message || e).slice(0, 300); } };
+    }
     const agentP = runAgent(ctx, pay.text || pay.prompt, { maxSteps: pay.maxSteps || 60, job: !!pay.long, chat: chat ? { history: pay.history || [], images: pay.images || [] } : null, budgetMs: chat ? budgetMs : 0, state: pay.state || null, keepBrowser: WARM && !chromeX });
     res = await Promise.race([agentP, cancelWait.then(() => ({ success: false, result: 'Stopped by you.', steps: [], images: [], cancelled: true }))]);
     if (res.cancelled) { const settled = await Promise.race([agentP.then(() => true, () => true), sleep(3000).then(() => false)]); if (!settled) res.zombie = true; } // a zombie agent (stuck in a model call) has ctx.cancelled and exits before touching any tab; the runner stays warm
@@ -153,6 +178,9 @@ async function runJob(pay, jobId, carry) {
     else ctx.session = { stop: false, end: async () => { ctx.session.stop = true; if (ctx._wake) ctx._wake(); try { await liveP; } catch { } } };
   }
   const fileUrl = base + '/runner/file';
+  const saveHome = async () => { // v5.3: keep the workspace for the next chat (only when it changed)
+    try { const pk = await packHome(); if (!pk || pk.hash === globalThis.__homeHash) return; const id = await upload({ bytes: readFileSync(pk.path), mime: 'application/gzip' }, 'home.tgz'); const o = await post('/runner/blob', { run: job.run, op: 'put-home', id, hash: pk.hash, files: pk.files }, true); if (o.ok) { globalThis.__homeHash = pk.hash; globalThis.__homeTs = Date.now(); } } catch { }
+  };
   const upload = async (f, name) => { const q = new URLSearchParams({ run: job.run, t: job.ft, name: name || f.name || 'file', mime: f.mime || 'application/octet-stream' }); const r = await fetch(fileUrl + '?' + q, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f.bytes }); if (!r.ok) throw new Error('upload ' + r.status); return (await r.json()).id; };
   if (res.cont) { // pack the work folder for the next runner (≤ 24 MB)
     try { const t = await sh('tar', ['--exclude=./.gradle', '--exclude=./.npm', '--exclude=./node_modules', '--exclude=*/node_modules', '--exclude=./.cache', '--exclude=./.android', '-czf', '/tmp/out-ws.tgz', '-C', WD, '.']); const st = statSync('/tmp/out-ws.tgz'); if (t.code === 0 && st.size < 24e6) res.cont.ws = await upload({ bytes: readFileSync('/tmp/out-ws.tgz'), mime: 'application/gzip' }, 'workspace.tgz'); } catch { }
@@ -163,6 +191,7 @@ async function runJob(pay, jobId, carry) {
   const seenNames = new Set(); for (const id of (res.files || []).slice().reverse()) { const f = images.get(id); const nm = f && f.name; if (!nm || seenNames.has(nm) || seenNames.size >= 8 || !job.ft) continue; seenNames.add(nm);
     try { outFiles.push({ id: await upload(f), name: nm, mime: f.mime, bytes: f.bytes.length }); } catch { } }
   res.files = outFiles;
+  if (chat && !res.cont) await saveHome();
   const steps = (res.steps || []).slice(-60);
   const stay = WARM && !chromeXUsed(pay);
   const body = await seal({ run: job.run, job: jobId, stay, ...res, steps, result: String(res.result || '').slice(0, 12000), images: imgs.slice(0, 6), cookies: outCookies, started, finished: Date.now(), ...(finalTabs || {}) });
@@ -176,6 +205,11 @@ async function runJob(pay, jobId, carry) {
     const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: small }) }); if (r.ok) { say('fail: big report'); return stay ? (ctx && ctx.session ? ctx : true) : false; }
   } catch { }
   say('fail: callback'); return false;
+}
+async function aptInstall(names) {
+  const run = (args, t) => sh('sudo', ['-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'timeout', String(t), ...args]);
+  if (!globalThis.__aptUpdated) { await run(['apt-get', 'update', '-qq'], 300); globalThis.__aptUpdated = true; }
+  return run(['apt-get', 'install', '-y', '-qq', '--no-install-recommends', ...names], 900);
 }
 function chromeXUsed(pay) { return !!(pay.chromeExts || []).length; }
 
