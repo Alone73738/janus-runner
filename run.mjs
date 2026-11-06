@@ -105,7 +105,7 @@ async function runJob(pay, jobId, carry) {
       ready: () => replay,
       shell: async (cmd, secs) => { await replay; return runCode('bash', cmd, secs, [], images); },
       fsx, skills, ws: wsSummary, attached,
-      card: chat ? async (t, k) => { try { await post('/runner/progress', { run: job.run, job: jobId, card: String(t).slice(0, 90), ck: k || 'ok' }); } catch { } } : null,
+      card: chat ? async (t, k) => { try { handle(await post('/runner/progress', { run: job.run, job: jobId, card: String(t).slice(0, 90), ck: k || 'ok' })); } catch { } } : null,
       mcpTools: [], mcpCall: null,
       images: { put: async (bytes, mime) => { const id = 'img_' + rid(); images.set(id, { bytes, mime }); return id; }, get: async (id) => images.get(id) || null },
       progress: chat ? async (info) => { // status line for the phone (+ Stop / new messages back)
