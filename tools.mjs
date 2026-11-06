@@ -8,7 +8,7 @@ const rid = () => [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toSt
 const unb64 = (s) => new Uint8Array(Buffer.from(s, 'base64'));
 const CHROME = [process.env.CHROME, '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find(p => p && existsSync(p));
 const WD = process.env.JANUS_WD || '/tmp/janus-work';
-const MIME = { apk: 'application/vnd.android.package-archive', aab: 'application/octet-stream', zip: 'application/zip', tgz: 'application/gzip', txt: 'text/plain', md: 'text/markdown', json: 'application/json', csv: 'text/csv', html: 'text/html', py: 'text/x-python', js: 'text/javascript', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', svg: 'image/svg+xml' , mov: 'video/quicktime', mkv: 'video/x-matroska', m4a: 'audio/mp4', ogg: 'audio/ogg', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
+const MIME = { vtt: 'text/vtt', srt: 'text/plain', apk: 'application/vnd.android.package-archive', aab: 'application/octet-stream', zip: 'application/zip', tgz: 'application/gzip', txt: 'text/plain', md: 'text/markdown', json: 'application/json', csv: 'text/csv', html: 'text/html', py: 'text/x-python', js: 'text/javascript', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf', svg: 'image/svg+xml' , mov: 'video/quicktime', mkv: 'video/x-matroska', m4a: 'audio/mp4', ogg: 'audio/ogg', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
 const asNobody = !process.env.JANUS_NO_SUDO; // local tests run without sudo
 mkdirSync(WD + '/inputs', { recursive: true }); try { chmodSync(WD, 0o777); chmodSync(WD + '/inputs', 0o777); } catch { }
 const images = new Map(); // id → {bytes, mime, name}
@@ -54,6 +54,41 @@ const fs = {
     if (!existsSync(p)) return 'No such file: ' + rel;
     return readFileSync(p, 'utf8');
   },
+};
+
+// ---- v5.3: persistent workspace helpers (the work folder IS the user's workspace; packed into KV between jobs) ----
+const JANUS_DIR = WD + '/.janus';
+const BUILTIN_SKILLS = new URL('./skills/', import.meta.url).pathname;
+function parseSkill(txt, fallbackName) { const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(txt); const meta = {}; if (m) for (const l of m[1].split('\n')) { const i = l.indexOf(':'); if (i > 0) meta[l.slice(0, i).trim()] = l.slice(i + 1).trim(); } return { name: meta.name || fallbackName, description: meta.description || '', body: (m ? m[2] : txt).trim() }; }
+const skills = {
+  list() { const out = new Map(); for (const [dir, own] of [[BUILTIN_SKILLS, false], [JANUS_DIR + '/skills', true]]) { try { for (const f of readdirSync(dir)) if (f.endsWith('.md')) { const k = parseSkill(readFileSync(dir + '/' + f, 'utf8'), f.slice(0, -3)); out.set(k.name, { ...k, own }); } } catch { } } return [...out.values()]; },
+  get(name) { const n = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-'); return this.list().find(k => k.name === n || k.name === name) || null; },
+  save(name, description, body) { const n = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '').slice(0, 40); if (!n) throw new Error('skill needs a name'); mkdirSync(JANUS_DIR + '/skills', { recursive: true }); writeFileSync(JANUS_DIR + '/skills/' + n + '.md', `---\nname: ${n}\ndescription: ${String(description || '').replace(/\n/g, ' ').slice(0, 200)}\n---\n${String(body || '').slice(0, 20000)}\n`); return n; },
+};
+const installs = {
+  file: JANUS_DIR + '/installs.json',
+  get() { try { return JSON.parse(readFileSync(this.file, 'utf8')); } catch { return { apt: [], pip: [], npm: [] }; } },
+  add(kind, names) { const o = this.get(); o[kind] = [...new Set([...(o[kind] || []), ...names])].slice(-60); mkdirSync(JANUS_DIR, { recursive: true }); writeFileSync(this.file, JSON.stringify(o)); },
+};
+async function pipInstall(names, secs = 900) { return runCode('bash', 'python3 -m pip install --user --quiet --disable-pip-version-check --break-system-packages ' + names.map(n => "'" + n.replace(/'/g, '') + "'").join(' ') + ' 2>&1 | tail -n 25', secs, [], new Map()); }
+async function npmInstall(names, secs = 600) { return runCode('bash', 'npm install -g --silent --prefix "$HOME/.local" ' + names.map(n => "'" + n.replace(/'/g, '') + "'").join(' ') + ' 2>&1 | tail -n 25', secs, [], new Map()); }
+function wsSummary() {
+  let top = []; try { top = readdirSync(WD).filter(n => !n.startsWith('.') && !n.startsWith('_main.') && n !== 'inputs').slice(0, 40).map(n => { try { const s = statSync(WD + '/' + n); return s.isDirectory() ? n + '/' : n + ' (' + (s.size > 1e6 ? (s.size / 1e6).toFixed(1) + ' MB' : Math.ceil(s.size / 1e3) + ' KB') + ')'; } catch { return n; } }); } catch { }
+  let inputs = []; try { inputs = readdirSync(WD + '/inputs').slice(0, 20); } catch { }
+  const ins = installs.get(); const ks = skills.list();
+  return { top, inputs, installs: ins, skills: ks.map(k => ({ name: k.name, description: k.description, own: k.own })) };
+}
+async function packHome() { // → {path, bytes, hash} or null
+  const ex = ['--exclude=./inputs', '--exclude=./_main.*', '--exclude=./.cache', '--exclude=./.npm', '--exclude=./.gradle', '--exclude=./.android', '--exclude=*/node_modules/.cache', '--exclude=./.local/lib/python3*/site-packages', '--exclude=./.local/lib/node_modules'];
+  let t = await sh('tar', [...ex, '-czf', '/tmp/home.tgz', '-C', WD, '.']); let st; try { st = statSync('/tmp/home.tgz'); } catch { return null; }
+  if (t.code !== 0) return null;
+  if (st.size > 23e6) { t = await sh('bash', ['-c', `cd "${WD}" && find . -type f -size -4M ! -path './inputs/*' ! -path './.cache/*' ! -path './.npm/*' ! -path './.gradle/*' ! -path './.local/lib/*' ! -name '_main.*' | head -5000 > /tmp/home.list && tar -czf /tmp/home.tgz -T /tmp/home.list`]); try { st = statSync('/tmp/home.tgz'); } catch { return null; } if (st.size > 23e6) return null; }
+  const h = await sh('bash', ['-c', `cd "${WD}" && find . -type f ! -path './inputs/*' ! -path './.cache/*' ! -path './.npm/*' ! -name '_main.*' -printf '%p %s %T@\\n' 2>/dev/null | sort | md5sum | cut -c1-32; find . -type f ! -path './inputs/*' 2>/dev/null | wc -l`]);
+  const [hash, files] = h.out.trim().split('\n'); return { path: '/tmp/home.tgz', bytes: st.size, hash: hash || '', files: +files || 0 };
+}
+const fsx = {
+  async edit(rel, oldT, newT) { const p = safe(rel); if (!existsSync(p)) return 'No such file: ' + rel; const t = readFileSync(p, 'utf8'); const n = t.split(String(oldT)).length - 1; if (!oldT || n === 0) return 'old_text not found in ' + rel + ' (read_file it and copy the exact text)'; if (n > 1) return 'old_text appears ' + n + ' times in ' + rel + '; give a longer unique piece'; writeFileSync(p, t.replace(String(oldT), () => String(newT ?? ''))); return 'Edited ' + rel; },
+  send(rel) { const p = safe(rel); if (!existsSync(p) || !statSync(p).isFile()) return { msg: 'No such file: ' + rel }; let name = relative(WD, p); if (name.includes('/')) { const base = name.split('/').pop(); writeFileSync(WD + '/' + base, readFileSync(p)); name = base; } const f = registerTop(name); return f ? { msg: 'Sent ' + name + ' to the user', file: f } : { msg: 'Cannot send ' + name + ' (unknown type or > 24 MB)' }; },
 };
 
 // ---- self-test: phone-sized headless Chromium, screenshots, errors, vision critique ----
@@ -198,4 +233,4 @@ async function download(url, name) {
 }
 
 export function setLLM(f) { llmRef = f; }
-export { CHROME, WD, MIME, images, registerTop, sh, runCode, fs, testWebApp, prepChromeExts, download };
+export { CHROME, WD, MIME, images, registerTop, sh, runCode, fs, testWebApp, prepChromeExts, download, skills, installs, pipInstall, npmInstall, wsSummary, packHome, fsx };
