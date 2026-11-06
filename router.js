@@ -23,15 +23,18 @@ export const GEMINI_MODELS = [...new Set([...GEMINI.main, ...GEMINI.fast, 'gemma
  *  GLM-5.3 hung → kept late; Step-5 preview + Mistral Large 4 answer tool calls in ~1 s).
  *  id, base, key ('none' = keyless), rpm / tpm / gapMs / inflight limits, maxIn = max request size in tokens,
  *  models[role] = ordered model ids (verified against the provider's live /models when a key exists). */
-const NV_TOP = ['nvidia/nemotron-3-ultra-550b-a55b', 'stepfun-ai/step-5-preview', 'mistralai/mistral-large-4-1t-a52b', 'deepseek-ai/deepseek-v4.1-flash'];
+// v5.3 live check 2026-11-06 14:35 IST (cloud/test/models-bench.mjs): Nemotron 3 Ultra tool call 1.4 s / code 2.7 s ✓,
+// Mistral Large 4 4.5 s ✓, Step-5 6–11 s ✓, DeepSeek V4.1 + GLM-5.3 timed out (40 s), Kimi K2.6 404, Gemini 3.8 Flash 503
+// (overloaded) and 3.6 Flash 8.5 s, Groq gpt-oss-120b 0.7 s / Qwen 3.8 0.4 s ✓, Codestral 0.9 s ✓, Nemotron 3.5 Super VL 1 s ✓.
+const NV_TOP = ['nvidia/nemotron-3-ultra-550b-a55b', 'mistralai/mistral-large-4-1t-a52b', 'stepfun-ai/step-5-preview', 'deepseek-ai/deepseek-v4.1-flash'];
 export const PROVIDERS = [
   { id: 'gemini', kind: 'gemini', rpm: 10, inflight: 4 },
   { id: 'nvidia', base: 'https://integrate.api.nvidia.com/v1', rpm: 38, inflight: 8, models: {
     main: NV_TOP, agent: NV_TOP,
     research: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash', 'mistralai/mistral-large-4-1t-a52b', 'stepfun-ai/step-5-preview'],
     long: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash'],
-    code: ['nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4.1-flash', 'mistralai/mistral-large-4-1t-a52b', 'stepfun-ai/step-5-preview'],
-    vision: ['stepfun-ai/step-5-preview', 'nvidia/nemotron-3.5-super-vl-120b-a12b', 'google/gemma-4-31b-it'],
+    code: ['nvidia/nemotron-3-ultra-550b-a55b', 'stepfun-ai/step-5-preview', 'mistralai/mistral-large-4-1t-a52b', 'deepseek-ai/deepseek-v4.1-flash'],
+    vision: ['nvidia/nemotron-3.5-super-vl-120b-a12b', 'stepfun-ai/step-5-preview', 'google/gemma-4-31b-it'],
     fast: ['nvidia/nemotron-3.5-lightning-30b-a3b', 'minimaxai/minimax-m3.1-flash'] } },
   { id: 'groq', base: 'https://api.groq.com/openai/v1', rpm: 28, tpm: 7600, maxIn: 5500, inflight: 4, models: { // 8K TPM: short jobs only
     fast: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'], code: ['openai/gpt-oss-120b'], main: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'], agent: ['openai/gpt-oss-120b'], research: ['openai/gpt-oss-120b'] } },
@@ -56,11 +59,11 @@ PROVIDERS.forEach(p => { if (!p.models) return; for (const r of ['agent', 'resea
 /** Provider order per role (custom providers are inserted before the keyless/trial tail). */
 export const ROLE_ORDER = {
   fast: ['groq', 'gemini', 'nvidia', 'zai', 'cfai', 'mistral', 'openrouter', 'llm7', '*custom', 'kilo', 'cerebras'],
-  main: ['gemini', 'nvidia', 'mistral', 'groq', 'openrouter', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
+  main: ['nvidia', 'gemini', 'groq', 'mistral', 'openrouter', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
   code: ['nvidia', 'mistral', 'gemini', 'groq', 'openrouter', 'llm7', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
-  agent: ['gemini', 'nvidia', 'mistral', 'groq', 'openrouter', 'zai', 'cfai', '*custom', 'kilo'],
+  agent: ['nvidia', 'gemini', 'groq', 'mistral', 'openrouter', 'zai', 'cfai', '*custom', 'kilo'],
   vision: ['gemini', 'nvidia', 'zai', 'openrouter', 'mistral', 'hetzner', 'cfai', '*custom', 'kilo'],
-  research: ['gemini', 'nvidia', 'mistral', 'openrouter', 'groq', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova'],
+  research: ['nvidia', 'gemini', 'mistral', 'openrouter', 'groq', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova'],
   long: ['gemini', 'nvidia', 'openrouter', 'mistral', '*custom', 'kilo'],
 };
 export const ROLES = Object.keys(ROLE_ORDER);
