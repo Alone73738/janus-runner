@@ -705,7 +705,7 @@ export async function runAgent(ctx, task, opts = {}) {
   if (cont) return { cont: { contents: contents.map(c => ({ role: c.role, parts: (c.parts || []).filter(p => !p.inlineData) })).map(c => c.parts.length ? c : { role: c.role, parts: [{ text: '…' }] }), stepNo, steps: steps.slice(-60), images: images.slice(-6), files: files.slice(-8) }, success: false, result: '', steps, images, files: files.slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
   if (result && result.success !== false && ctx.lastOpen && !ctx.lastOpen.ok && OPEN_CLAIM.test(String(result.result || '')) && !/nahi|didn.t|not|couldn|failed|band/i.test(String(result.result || ''))) result = { ...result, success: false, result: notOpenedLine(ctx.lastOpen.url, ctx.lastOpen.why, lang) }; // v5.4 code-level false-success guard
   if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Last steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
-  return { ...result, steps, images: images.concat(lastShot ? [lastShot] : []).filter((x, i, a) => a.indexOf(x) === i).slice(-6), files: files.filter((x, i, a) => a.indexOf(x) === i).slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
+  return { ...result, steps, images: images.concat(lastShot && !opts.chat ? [lastShot] : []).filter((x, i, a) => a.indexOf(x) === i).slice(-6), files: files.filter((x, i, a) => a.indexOf(x) === i).slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
 }
 
 const OPEN_CLAIM = /(open|khul|khol)\s*(ho\s*gay|gay|ho\s*chuk|kar\s*diy|ed\b)|\bis (now )?open|\bopened\b/i;
