@@ -89,10 +89,15 @@ const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_
 const GOOGLE_TIP = ` Google sign-in: if a site needs a login and its own login is NOT in the saved list but google.com IS, use the site's "Continue with Google" / "Sign in with Google" button, then on accounts.google.com call sign_in (email page, then call sign_in again on the password page). If Google shows "This browser or app may not be secure", a captcha or asks for phone approval, you cannot pass it from the cloud: say so plainly and ask the user to share that site's own email+password login in JANUS → Settings → Cloud → Logins.`;
 
 // Hark-level behaviour, shared by chat jobs, scheduled tasks and cloud computer jobs.
-export const CORE_RULES = `HOW YOU WORK
-- Answer first. Short, clear, in the user's language (Hinglish if they write Hinglish). No fluff, no "Great question", no long intros, no step lists unless asked. Use Markdown only when it helps.
+export const CORE_RULES = `HOW YOU TALK (like a sharp, honest friend)
+- Answer first, in 1–3 short lines. Then only the detail that helps. No filler ("Sure!", "Great question", "I hope this helps"), no step lists, no repeating the question.
+- Same language and script as the user: Roman Hinglish stays Roman Hinglish (never Devanagari unless they wrote it), English stays English.
+- Clean Markdown when it helps: **bold** for the key fact, short bullet lists, a table for comparisons, fenced code blocks with the language, real links. Never a wall of text.
+- Before working: ONE short intro line saying what you do first, then act at once (no "should I?").
+HOW YOU WORK
 - Plan → act → verify. For any multi-step task make a short plan in your head, do it step by step with tools, and CHECK the result (read the page, run the code, test the app) before you say it is done.
 - Never fake success. Say "done" only when your own steps prove it (page shows it was posted, build produced the file, test passed). If something failed, say exactly what failed and what the user can do.
+- Opening a site counts as done ONLY when the tool result shows the page really loaded (title + real text). If open_url says NOT LOADED / BLOCKED / blank / captcha / HTTP 4xx-5xx, never say it opened: say so in ONE honest line with the reason (e.g. "TikTok India mein band hai, isliye nahi khula") and offer an alternative.
 - Never promise abilities you do not have, and never promise to do something later unless a schedule exists. Never invent where a setting, code or account lives. If unsure, say you are unsure.
 - Use the whole step budget on long tasks: keep working until the task is really finished. Never ask the user to say "continue", never stop half-way to report progress.
 - No placeholders: complete production-quality code, real data, every file in full.
@@ -185,7 +190,7 @@ export function markActive(ctx, page) { const t = tabOf(ctx, page); if (t) { ctx
 /** Close every page (stop button, end of a job); the tab entries keep their last screenshot for the phone. */
 export async function closeAllTabs(ctx) { for (const t of ctx.tabs || []) { if (t.page) { const p = t.page; t.page = null; t.closed = true; try { await p.close(); } catch { } } } }
 /** Best-effort URL for a sub-task / quick task, so a tab can open the site BEFORE the first (slow) model call. */
-const SITE_URLS = { pinterest: 'https://www.pinterest.com/', youtube: 'https://m.youtube.com/', 'you tube': 'https://m.youtube.com/', google: 'https://www.google.com/', amazon: 'https://www.amazon.in/', flipkart: 'https://www.flipkart.com/', instagram: 'https://www.instagram.com/', facebook: 'https://www.facebook.com/', twitter: 'https://x.com/', linkedin: 'https://www.linkedin.com/', github: 'https://github.com/', reddit: 'https://www.reddit.com/', wikipedia: 'https://www.wikipedia.org/', myntra: 'https://www.myntra.com/', netflix: 'https://www.netflix.com/', spotify: 'https://open.spotify.com/', zomato: 'https://www.zomato.com/', swiggy: 'https://www.swiggy.com/', meesho: 'https://www.meesho.com/', ajio: 'https://www.ajio.com/', croma: 'https://www.croma.com/', nykaa: 'https://www.nykaa.com/', tumblr: 'https://www.tumblr.com/', bing: 'https://www.bing.com/', duckduckgo: 'https://duckduckgo.com/', chatgpt: 'https://chatgpt.com/', gmail: 'https://mail.google.com/', quora: 'https://www.quora.com/', imdb: 'https://www.imdb.com/', 'hacker news': 'https://news.ycombinator.com/' };
+const SITE_URLS = { tiktok: 'https://www.tiktok.com/', pinterest: 'https://www.pinterest.com/', youtube: 'https://m.youtube.com/', 'you tube': 'https://m.youtube.com/', google: 'https://www.google.com/', amazon: 'https://www.amazon.in/', flipkart: 'https://www.flipkart.com/', instagram: 'https://www.instagram.com/', facebook: 'https://www.facebook.com/', twitter: 'https://x.com/', linkedin: 'https://www.linkedin.com/', github: 'https://github.com/', reddit: 'https://www.reddit.com/', wikipedia: 'https://www.wikipedia.org/', myntra: 'https://www.myntra.com/', netflix: 'https://www.netflix.com/', spotify: 'https://open.spotify.com/', zomato: 'https://www.zomato.com/', swiggy: 'https://www.swiggy.com/', meesho: 'https://www.meesho.com/', ajio: 'https://www.ajio.com/', croma: 'https://www.croma.com/', nykaa: 'https://www.nykaa.com/', tumblr: 'https://www.tumblr.com/', bing: 'https://www.bing.com/', duckduckgo: 'https://duckduckgo.com/', chatgpt: 'https://chatgpt.com/', gmail: 'https://mail.google.com/', quora: 'https://www.quora.com/', imdb: 'https://www.imdb.com/', 'hacker news': 'https://news.ycombinator.com/' };
 export function guessUrl(text) {
   const t = String(text || ''); const m = /https?:\/\/[^\s"'<>)]+/i.exec(t); if (m) return m[0];
   const d = /\b([a-z0-9-]+\.(?:com|in|org|net|io|co|dev|app|ai|me|tv)(?:\.[a-z]{2})?)(\/[^\s]*)?\b/i.exec(t); if (d) return 'https://' + d[1] + (d[2] || '/');
@@ -200,6 +205,26 @@ export function tabCount(text) { const m = /\b(\d{1,2})\s*(tabs?|browsers?|windo
 export function isJustOpen(text) { const t = String(text || '').toLowerCase().replace(/[!?,]|\.(\s|$)/g, ' ').replace(/\s+/g, ' ').trim(); if (t.length > 80) return false; if (!guessUrl(t)) return false; const rest = t.replace(/https?:\/\/\S+/g, ' ').replace(/\b(open|kholo|khol|khol do|karo|kar do|please|plz|pls|jaldi|fast|quick|quickly|abhi|in|mein|me|ek|tab|tabs|new|naya|browser|site|website|the|a|par|pe|jao|go|to|and|aur|do|de|dena|show|dikhao|[0-9]+(st|nd|rd|th)?|no|number|wala|wali)\b/g, ' ');
   return !Object.keys(SITE_URLS).reduce((r, k) => r.replace(new RegExp('\\b' + k + '\\b', 'g'), ' '), rest.replace(/[a-z0-9-]+\.(com|in|org|net|io|co|dev|app|ai|me|tv)\S*/g, ' ')).trim(); }
 const settle = async (p) => { try { await p.waitForNetworkIdle({ idleTime: 500, timeout: 6000 }); } catch { } };
+/** v5.4: did the page REALLY load? HTTP status, title, visible text, chrome-error/blank/captcha. → {ok, why, title, n} */
+const REGION_BAN = { 'tiktok.com': { hi: 'TikTok India mein band hai', en: 'TikTok is banned in India' } };
+export function banOf(u) { const h = host(u); for (const k of Object.keys(REGION_BAN)) if (h === k || h.endsWith('.' + k)) return REGION_BAN[k]; return null; }
+export async function verifyPage(p, url, status, err) {
+  if (err) return { ok: false, why: /ERR_NAME_NOT_RESOLVED/.test(err) ? 'site ka address nahi mila' : /TIMED_OUT|Timeout/i.test(err) ? 'site time pe load nahi hui' : err.slice(0, 60), title: '', n: 0 };
+  let info = { t: '', n: 0, u: '', imgs: 0 };
+  for (let k = 0; k < 6; k++) { try { info = await p.evaluate(() => ({ t: document.title || '', n: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').trim().length, u: location.href, imgs: document.images.length + document.querySelectorAll('video,canvas,svg').length, txt: ((document.body && document.body.innerText) || '').slice(0, 1200) })); } catch { } if (info.n >= 40 || info.imgs >= 3) break; await new Promise(z => setTimeout(z, 700)); }
+  const wall = /captcha|verify you are (a )?human|are you a robot|unusual traffic|just a moment\.\.\.|access denied|attention required|request blocked|not available in your (country|region)|isn.t available in your/i.exec(info.t + ' ' + (info.txt || ''));
+  if (/^chrome-error:|^about:blank/.test(info.u || '')) return { ok: false, why: 'page load nahi hua', title: info.t, n: 0 };
+  if (status >= 400) return { ok: false, why: 'site ne HTTP ' + status + ' diya', title: info.t, n: info.n };
+  if (wall) return { ok: false, why: 'page pe block/captcha hai ("' + wall[0] + '")', title: info.t, n: info.n, wall: true };
+  if (info.n < 40 && info.imgs < 3) return { ok: false, why: 'page khali (blank) aaya', title: info.t, n: info.n };
+  return { ok: true, why: '', title: info.t, n: info.n };
+}
+/** One honest line when a site did not open (+ alternative). */
+export function notOpenedLine(url, why, lang) {
+  const nm = siteName(url); const ban = banOf(url);
+  if (lang === 'hi') return (ban ? `${nm} nahi khula — ${ban.hi}${why && !/blank|khali/.test(why) ? ' (' + why + ')' : ''}.` : `${nm} nahi khula — ${why || 'page load nahi hua'}.`) + (ban ? ' Chaho to iska kaam YouTube Shorts ya Instagram Reels pe kar dun?' : ' Dobara try karun ya koi aur site kholun?');
+  return (ban ? `${nm} didn't open — ${ban.en}${why ? ' (' + why + ')' : ''}.` : `${nm} didn't open — ${why || 'the page did not load'}.`) + (ban ? ' Want me to use YouTube Shorts or Instagram Reels instead?' : ' Retry, or try another site?');
+}
 /** Browser tools bound to one page (main agent and every sub-agent get their own). info = {task, step()} */
 export function pageTools(ctx, getPage0, info) {
   const getPage = async () => { const p = await getPage0(); markActive(ctx, p); return p; };
@@ -208,8 +233,9 @@ export function pageTools(ctx, getPage0, info) {
     open_url: async ({ url }) => { // v5.3: blocked / unreachable / captcha pages are detected and reported clearly (retry once)
       const p = await getPage(); let err = '';
       for (let k = 0; k < 2; k++) { try { const r = await p.goto(url, { waitUntil: 'domcontentloaded', timeout: k ? 20000 : 30000 }); err = r && r.status() >= 400 ? 'HTTP ' + r.status() : ''; break; } catch (e) { err = String(e && e.message || e).replace(/\s+at .*/s, '').slice(0, 120); if (/ERR_NAME_NOT_RESOLVED|ERR_INVALID_URL/.test(err)) break; } }
-      if (err && !/^HTTP/.test(err)) return 'BLOCKED: ' + host(url) + ' did not load (' + err + ') even after a retry. Use an alternative (another site, read_url, web_search, the m. version) or tell the user in one line and ask.';
+      if (err && !/^HTTP/.test(err)) { ctx.lastOpen = { url, ok: false, why: err.slice(0, 60) }; return 'BLOCKED: ' + host(url) + ' did not load (' + err + ') even after a retry. Use an alternative (another site, read_url, web_search, the m. version) or tell the user in one line and ask.'; }
       await settle(p); const ti = await p.title().catch(() => '');
+      { const st = +((/HTTP (\d+)/.exec(err) || [])[1] || 0); const v = await verifyPage(p, url, st, ''); ctx.lastOpen = { url, ok: v.ok, why: v.why }; if (!v.ok && !v.wall) return 'NOT LOADED: ' + host(url) + ' — ' + v.why + (banOf(url) ? ' (' + banOf(url).en + ')' : '') + '. Title: "' + clip(v.title, 60) + '". Do NOT say it opened. Try once more or an alternative; else tell the user in ONE honest line with this reason.'; }
       const body = await p.evaluate(() => (document.body && document.body.innerText || '').slice(0, 1500)).catch(() => '');
       const wall = /captcha|verify you are (a )?human|are you a robot|unusual traffic|just a moment\.\.\.|access denied|attention required|request blocked|not available in your (country|region)/i.exec(ti + ' ' + body);
       const warn = (err ? 'WARNING: the site answered ' + err + '. ' : '') + (wall ? 'WARNING: this page shows a block/captcha ("' + wall[0] + '"). Do not loop on it: wait 5 s and reload once, else use an alternative or tell the user in one line.\n' : '');
@@ -301,7 +327,7 @@ export function pageTools(ctx, getPage0, info) {
 
 
 // ---------------- v5.1: short human status lines (same wording as the phone) ----------------
-const SITE_NAMES = { 'youtube.com': 'YouTube', 'youtu.be': 'YouTube', 'google.com': 'Google', 'amazon.in': 'Amazon', 'amazon.com': 'Amazon', 'flipkart.com': 'Flipkart', 'instagram.com': 'Instagram', 'facebook.com': 'Facebook', 'x.com': 'X', 'twitter.com': 'X', 'linkedin.com': 'LinkedIn', 'github.com': 'GitHub', 'pinterest.com': 'Pinterest', 'reddit.com': 'Reddit', 'wikipedia.org': 'Wikipedia', 'duckduckgo.com': 'DuckDuckGo', 'bing.com': 'Bing', 'myntra.com': 'Myntra', 'croma.com': 'Croma', 'meesho.com': 'Meesho', 'vimeo.com': 'Vimeo' };
+const SITE_NAMES = { 'tiktok.com': 'TikTok', 'youtube.com': 'YouTube', 'youtu.be': 'YouTube', 'google.com': 'Google', 'amazon.in': 'Amazon', 'amazon.com': 'Amazon', 'flipkart.com': 'Flipkart', 'instagram.com': 'Instagram', 'facebook.com': 'Facebook', 'x.com': 'X', 'twitter.com': 'X', 'linkedin.com': 'LinkedIn', 'github.com': 'GitHub', 'pinterest.com': 'Pinterest', 'reddit.com': 'Reddit', 'wikipedia.org': 'Wikipedia', 'duckduckgo.com': 'DuckDuckGo', 'bing.com': 'Bing', 'myntra.com': 'Myntra', 'croma.com': 'Croma', 'meesho.com': 'Meesho', 'vimeo.com': 'Vimeo' };
 export const isHing = (t) => /\b(hai|hain|karo|kardo|kar do|karke|karna|mujhe|mera|meri|kya|kaise|kyun|nahi|nhi|yr|yaar|bhai|kholo|khol|dhoondo|dhundo|dikhao|batao|wala|wali|aur|abhi|chahiye|lekin|bhi|sab|kuch|mein|yah|yaha|yahan|usme|isme|bata|bolo|ka|ke|ki|ko|se|pe|par)\b/i.test(String(t || ''));
 const siteName = (u) => { const k = siteKey(/^[a-z]+:\/\//i.test(String(u || '')) ? u : 'https://' + u); if (SITE_NAMES[k]) return SITE_NAMES[k]; const b = (k || 'site').split('.')[0]; return b.charAt(0).toUpperCase() + b.slice(1); };
 const qq = (t, n = 34) => { t = String(t || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
@@ -591,6 +617,7 @@ export async function runAgent(ctx, task, opts = {}) {
       const out = await impl.open_url({ url }); steps.push({ tool: 'open_url', args: { url }, out: clip(String(out), 300) });
       if (ctx.snapNow) { try { await ctx.snapNow(); } catch { } }
       let ti = ''; try { ti = await page.title(); } catch { }
+      if (ctx.lastOpen && ctx.lastOpen.url === url && !ctx.lastOpen.ok) return { success: false, result: notOpenedLine(url, ctx.lastOpen.why, lang), steps, images, files, keepTabs: true, model: 'instant' }; // v5.4: never claim a blank/blocked page opened
       return { success: true, result: lang === 'hi' ? `${nm} khul gaya ✓${ti ? ' — “' + clip(ti, 60) + '”' : ''}. Upar browser mein dekh lo; text box pe tap karke seedha type bhi kar sakte ho. Aage kya karna hai?` : `${nm} is open ✓${ti ? ' — “' + clip(ti, 60) + '”' : ''}. It's in the browser above; tap any text box to type. What next?`, steps, images, files, keepTabs: true, model: 'instant' };
     } catch (e) { steps.push({ tool: 'open_url', args: { url }, out: 'ERROR ' + clip(String(e && e.message || e), 120) }); }
   }
@@ -603,9 +630,9 @@ export async function runAgent(ctx, task, opts = {}) {
         for (const c of contents.slice(1, -12)) { if (c._c) continue; c._c = 1; c.parts = (c.parts || []).filter(p => !p.inlineData || c === contents[contents.length - 1]).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 700) } } } : (p.functionCall && p.functionCall.name === 'write_file') ? { functionCall: { name: 'write_file', args: { path: p.functionCall.args.path, content: '(written, ' + String(p.functionCall.args.content || '').length + ' chars; read_file to see it)' } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
       }
       let resp;
-      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: route === 'code' ? 600000 : 120000, firstMs: route === 'code' ? 60000 : 20000 }); llmFails = 0; }
+      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: route === 'code' ? 600000 : 120000, firstMs: i === 0 ? 8000 : route === 'code' ? 60000 : 20000, ...(i === 0 ? { race: true, fastFirst: true } : {}) }); llmFails = 0; }
       catch (e) { // every free model busy: wait and retry this step instead of throwing the whole job away
-        if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); for (let w = 0; w < 60 && !ctx.cancelled && !(ctx.inbox || []).length; w++) await new Promise(z => setTimeout(z, 1000)); i--; continue; }
+        if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); for (let w = 0; w < [5, 15, 30][llmFails - 1] && !ctx.cancelled && !(ctx.inbox || []).length; w++) await new Promise(z => setTimeout(z, 1000)); i--; continue; }
         const made = files.length ? ' Jo files ban chuki hain woh neeche hain.' : '';
         result = { success: false, result: 'Abhi saare free AI models busy/limit pe hain, isliye kaam beech mein rukna pada (' + steps.length + ' steps ho chuke the).' + made + ' Thodi der baad "continue" bolo.' }; break;
       }
@@ -676,10 +703,12 @@ export async function runAgent(ctx, task, opts = {}) {
     // (warm runner: keepBrowser = the browser process stays for the next job; run.mjs closes the pages)
   }
   if (cont) return { cont: { contents: contents.map(c => ({ role: c.role, parts: (c.parts || []).filter(p => !p.inlineData) })).map(c => c.parts.length ? c : { role: c.role, parts: [{ text: '…' }] }), stepNo, steps: steps.slice(-60), images: images.slice(-6), files: files.slice(-8) }, success: false, result: '', steps, images, files: files.slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
+  if (result && result.success !== false && ctx.lastOpen && !ctx.lastOpen.ok && OPEN_CLAIM.test(String(result.result || '')) && !/nahi|didn.t|not|couldn|failed|band/i.test(String(result.result || ''))) result = { ...result, success: false, result: notOpenedLine(ctx.lastOpen.url, ctx.lastOpen.why, lang) }; // v5.4 code-level false-success guard
   if (!result) result = { success: false, result: 'Step limit khatam ho gaya, task poora nahi hua. Last steps: ' + steps.slice(-3).map(x => x.tool).join(' → ') };
   return { ...result, steps, images: images.concat(lastShot ? [lastShot] : []).filter((x, i, a) => a.indexOf(x) === i).slice(-6), files: files.filter((x, i, a) => a.indexOf(x) === i).slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
 }
 
+const OPEN_CLAIM = /(open|khul|khol)\s*(ho\s*gay|gay|ho\s*chuk|kar\s*diy|ed\b)|\bis (now )?open|\bopened\b/i;
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'the site'; } };
 
 // Checker: never let the agent claim a success its own steps don't show.
