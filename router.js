@@ -258,7 +258,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
       if (ready.length === 2) {
         const ac = new AbortController(); const t0 = Date.now();
         const go = async ({ p, m }) => { const k2 = p.id + ':' + m; lim.take(p, tok); let ok = false, used = 0; try { const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, { ...o, signal: ac.signal }) : await callOAI(p, m, contents, tools, { ...o, signal: ac.signal }); ok = true; used = parts.usage || 0; return { parts, model: k2 }; } catch (e) { if (!ac.signal.aborted || e.status !== 'timeout') { errs.push(k2 + ':' + e.status); if (e.status === 429) lim.block(p, e.retryAfter ? e.retryAfter * 1000 : 20000); else if (e.status === 'timeout') cool.set(k2, Date.now() + 5 * 60e3); else if (e.status === 401 && p.kind !== 'gemini') lim.block(p, 6 * 3600e3); } throw e; } finally { lim.done(p, ok ? used : 0); } };
-        try { const w = await Promise.any(ready.map(go)); ac.abort('won'); last = w.model; log && log('model', w.model + ' (race ' + (Date.now() - t0) + 'ms)'); return w; } catch { }
+        try { const w = await Promise.any(ready.map(go)); ac.abort('won'); last = w.model; log && log('model', w.model + ' (race ' + (Date.now() - t0) + 'ms)'); return w; } catch { log && log('race-fail', errs.join(',') + ' ' + (Date.now() - t0) + 'ms'); }
         o = { ...o, _raced: true };
       }
     }
@@ -270,7 +270,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
         if (p.maxIn && tok > p.maxIn) continue; // e.g. Groq 8K TPM: keep its requests short
         if (!(p.id in live)) verifyLive(p).catch(() => { }); if (live[p.id] && !live[p.id].has(m)) { cool.set(k2, Date.now() + 6 * 3600e3); continue; }
         const w = lim.wait(p, tok);
-        if (w > 0 && (pass === 0 || w > 65000)) { if (w < minWait) minWait = w; deferred++; continue; } // busy: try the next provider
+        if (w > 0 && (pass === 0 || w > 65000)) { if (w < minWait) minWait = w; deferred++; log && log('defer', k2 + ' wait ' + w + 'ms tok ' + tok); continue; } // busy: try the next provider
         if (w > 0) await sleep(w);
         for (let attempt = 0; attempt < 2; attempt++) {
           lim.take(p, tok); let ok = false, used = 0;
@@ -300,7 +300,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     let lastErr;
     const waits = o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000];
     for (let round = 0; round <= waits.length; round++) {
-      try { return await once(contents, tools, o); } catch (e) { lastErr = e; if (round < waits.length) { await sleep(waits[round]); cool.clear(); } }
+      try { return await once(contents, tools, o); } catch (e) { lastErr = e; log && log('round-fail', round + ' ' + String(e.message || e).slice(0, 140)); if (round < waits.length) { await sleep(waits[round]); cool.clear(); } }
     }
     throw lastErr;
   };
