@@ -60,7 +60,7 @@ async function runJob(pay, jobId, carry) {
   try {
     const ai = { run: async (model, input) => { const o = await post('/runner/ai', { run: job.run, model, input }); if (!o.ok) throw new Error(o.err); return o.out; } };
     const keys = { gemini: pay.gemini || null, ...(pay.oai || {}), ...(pay.keys || {}) };
-    const llm = makeRouter({ keys, ai }); setLLM(llm);
+    const diag = []; const jt0 = Date.now(); const llm = makeRouter({ keys, ai, log: (k, v) => { const l = '+' + ((Date.now() - jt0) / 1000).toFixed(1) + 's ' + k + ' ' + String(v).slice(0, 120); diag.push(l); if (diag.length > 40) diag.shift(); say('llm ' + l); } }); setLLM(llm); globalThis.__diag = diag; // v5.4 timeline
     const sites = Object.keys(pay.logins || {});
     const keep = (c) => sites.some(s => { const d = String(c.domain || '').replace(/^\./, ''); return d === s || d.endsWith('.' + s); });
     let cookies = [];
@@ -150,7 +150,7 @@ async function runJob(pay, jobId, carry) {
       if (ft && due) { const s = ft.page ? await snap(ft, 0.5) : ft.last; if (s && (ft.page || sentAt[ft.id] !== 'last')) { shots.push({ tab: ft.id, ...s }); if (!ft.page) sentAt[ft.id] = 'last'; } }
       if (tick % 3 === 1) { const others = (ctx.tabs || []).filter(t => t.page && t.id !== focusId); if (others.length) { const o = others[rr++ % others.length]; const s = await snap(o, 0.32); if (s) shots.push({ tab: o.id, ...s }); } }
       forceNow = false; tick++;
-      const body = { run: job.run, job: jobId, session: !!ctx.session, tabs: (ctx.tabs || []).map(t => ({ id: t.id, t: t.t, u: t.u, s: t.closed && t.s === 'run' ? 'done' : t.s, o: t.owner, ts: t.ts })), active: ctx.activeTab || null, shots };
+      const body = { diag: (globalThis.__diag || []).slice(-24), run: job.run, job: jobId, session: !!ctx.session, tabs: (ctx.tabs || []).map(t => ({ id: t.id, t: t.t, u: t.u, s: t.closed && t.s === 'run' ? 'done' : t.s, o: t.owner, ts: t.ts })), active: ctx.activeTab || null, shots };
       if (io && io.focus) body.focus = io.focus; if (io && typeof io.clip === 'string') body.clip = io.clip;
       try { handle(await post('/runner/live', body)); } catch { }
     };
