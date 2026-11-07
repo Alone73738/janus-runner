@@ -289,6 +289,9 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
         }
       }
       if (!deferred) break;
+      if (pass === 0 && minWait > 8000 && ai && o.route !== 'vision' && !o._wai) { // v5.4: every provider is rate-limited → Workers AI now instead of sleeping
+        try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; log && log('model', 'workers-ai (all others busy ' + Math.round(minWait / 1000) + 's)'); return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); o = { ...o, _wai: true }; }
+      }
       if (pass === 0) await sleep(Math.min(minWait, 20000));
     }
     if (ai && o.route !== 'vision') { try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); } }
