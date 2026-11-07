@@ -215,7 +215,9 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
       if (stream) { body.stream = true; body.stream_options = { include_usage: true }; }
       const h = { 'content-type': 'application/json', accept: stream ? 'text/event-stream' : 'application/json' }; const k = keyOf(p); if (k) h.authorization = 'Bearer ' + k;
       if (p.id === 'openrouter') { h['HTTP-Referer'] = 'https://janus.app'; h['X-Title'] = 'JANUS'; }
-      const r = await fetchImpl(baseOf(p) + '/chat/completions', { method: 'POST', signal: ac.signal, headers: h, body: S(body) });
+      if (o.signal) { if (o.signal.aborted) ac.abort('race'); else o.signal.addEventListener('abort', () => ac.abort('race'), { once: true }); }
+      const pre = setTimeout(() => ac.abort('first'), o.firstMs || 40000); // v5.4: first-token clock starts before the headers arrive
+      let r; try { r = await fetchImpl(baseOf(p) + '/chat/completions', { method: 'POST', signal: ac.signal, headers: h, body: S(body) }); } finally { clearTimeout(pre); }
       if (!r.ok) { const t = await r.text().catch(() => ''); const ra = +(r.headers.get('retry-after') || 0); throw Object.assign(new Error(p.id + ' ' + r.status + ' ' + t.slice(0, 120)), { status: r.status, retryAfter: ra, daily: /per ?day|daily|RPD/i.test(t) }); }
       let content = '', calls = [], usage = 0;
       if (stream && /event-stream/.test(r.headers.get('content-type') || '')) { const s = await readSSE(r, ac, o.firstMs || 40000, o.idleMs || 300000); content = s.content; calls = s.calls; usage = s.usage; }
@@ -239,24 +241,34 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     if (tools && tools.length) body.tools = [{ functionDeclarations: tools }];
     const headers = { 'content-type': 'application/json' }; if (geminiKeyInHeader && keys.gemini) headers['x-goog-api-key'] = keys.gemini;
-    const r = await fetchImpl(`${geminiBase}/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body), signal: AbortSignal.timeout(o.timeoutMs || 180000) }).catch(() => { throw Object.assign(new Error('gemini timeout'), { status: 'timeout' }); });
+    const r = await fetchImpl(`${geminiBase}/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body), signal: o.signal && AbortSignal.any ? AbortSignal.any([o.signal, AbortSignal.timeout(o.fastFirst ? Math.max(15000, (o.firstMs || 8000) * 2) : (o.timeoutMs || 180000))]) : AbortSignal.timeout(o.fastFirst ? Math.max(15000, (o.firstMs || 8000) * 2) : (o.timeoutMs || 180000)) }).catch(() => { throw Object.assign(new Error('gemini timeout'), { status: 'timeout' }); });
     if (!r.ok) { const t = await r.text().catch(() => ''); throw Object.assign(new Error('gemini ' + r.status + ' ' + t.slice(0, 120)), { status: r.status, daily: /per ?day/i.test(t) }); }
     const j = await r.json(); const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
     if (!parts || !parts.length) throw Object.assign(new Error('gemini empty'), { status: 'empty' });
     return parts;
   }
   async function once(contents, tools, o) {
-    const errs = []; const tok = estTokens(contents, o.system, tools);
+    const errs = []; const slow = new Set(); const tok = estTokens(contents, o.system, tools);
     if (tok > 100000 && o.route !== 'vision' && o.route !== 'long') o = { ...o, route: 'long' }; // very long context → 1M-context models first
     let list = expand(o.route || 'main');
     if (o.spread && list.length > 1) { const provs = [...new Set(list.map(x => x.p.id))]; const lead = provs[o.spread % Math.min(provs.length, 3)]; list = [...list.filter(x => x.p.id === lead), ...list.filter(x => x.p.id !== lead)]; }
+    if (o.race && !o._raced) { // v5.4: first step — race the first 2 ready providers, take the first answer
+      const ready = []; const seen = new Set();
+      for (const x of list) { const k2 = x.p.id + ':' + x.m; if (seen.has(x.p.id) || (cool.get(k2) || 0) > Date.now() || (x.p.maxIn && tok > x.p.maxIn) || lim.wait(x.p, tok) > 0 || (live[x.p.id] && !live[x.p.id].has(x.m))) continue; seen.add(x.p.id); ready.push(x); if (ready.length === 2) break; }
+      if (ready.length === 2) {
+        const ac = new AbortController(); const t0 = Date.now();
+        const go = async ({ p, m }) => { const k2 = p.id + ':' + m; lim.take(p, tok); let ok = false, used = 0; try { const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, { ...o, signal: ac.signal }) : await callOAI(p, m, contents, tools, { ...o, signal: ac.signal }); ok = true; used = parts.usage || 0; return { parts, model: k2 }; } catch (e) { if (!ac.signal.aborted || e.status !== 'timeout') { errs.push(k2 + ':' + e.status); if (e.status === 429) lim.block(p, e.retryAfter ? e.retryAfter * 1000 : 20000); else if (e.status === 'timeout') cool.set(k2, Date.now() + 5 * 60e3); else if (e.status === 401 && p.kind !== 'gemini') lim.block(p, 6 * 3600e3); } throw e; } finally { lim.done(p, ok ? used : 0); } };
+        try { const w = await Promise.any(ready.map(go)); ac.abort('won'); last = w.model; log && log('model', w.model + ' (race ' + (Date.now() - t0) + 'ms)'); return w; } catch { }
+        o = { ...o, _raced: true };
+      }
+    }
     for (let pass = 0; pass < 2; pass++) {
       let minWait = Infinity, deferred = 0;
       for (let i = 0; i < list.length; i++) {
         const { p, m } = list[i]; const k2 = p.id + ':' + m;
-        if ((cool.get(k2) || 0) > Date.now()) continue;
+        if ((cool.get(k2) || 0) > Date.now() || slow.has(p.id)) continue; // v5.4: a provider that timed out is skipped for the rest of this call
         if (p.maxIn && tok > p.maxIn) continue; // e.g. Groq 8K TPM: keep its requests short
-        await verifyLive(p); if (live[p.id] && !live[p.id].has(m)) { cool.set(k2, Date.now() + 6 * 3600e3); continue; }
+        if (!(p.id in live)) verifyLive(p).catch(() => { }); if (live[p.id] && !live[p.id].has(m)) { cool.set(k2, Date.now() + 6 * 3600e3); continue; }
         const w = lim.wait(p, tok);
         if (w > 0 && (pass === 0 || w > 65000)) { if (w < minWait) minWait = w; deferred++; continue; } // busy: try the next provider
         if (w > 0) await sleep(w);
@@ -267,6 +279,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
             ok = true; used = parts.usage || 0; last = k2; log && log('model', k2); return { parts, model: k2 };
           } catch (e) {
             const s = e.status; errs.push(k2 + ':' + s); if (s === 'cut' || s === 504) cutSeen = true; log && log('fail', k2 + ' ' + s + ' ' + String(e.message || '').slice(0, 80));
+            if (s === 'timeout') slow.add(p.id);
             if (s === 401 && p.kind !== 'gemini') { lim.block(p, 6 * 3600e3); break; } // bad key: skip the whole provider
             if (s === 429) { lim.block(p, e.retryAfter ? e.retryAfter * 1000 : e.daily ? 3 * 3600e3 : 20000); break; } // switch provider on 429
             if ((s >= 500 || s === 'empty') && attempt < 1 && list.length < 3) { await sleep(1500); continue; }
