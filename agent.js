@@ -89,6 +89,8 @@ const SITE_TIPS = `Site tips: For any image the task needs, ALWAYS use generate_
 const GOOGLE_TIP = ` Google sign-in: if a site needs a login and its own login is NOT in the saved list but google.com IS, use the site's "Continue with Google" / "Sign in with Google" button, then on accounts.google.com call sign_in (email page, then call sign_in again on the password page). If Google shows "This browser or app may not be secure", a captcha or asks for phone approval, you cannot pass it from the cloud: say so plainly and ask the user to share that site's own email+password login in JANUS → Settings → Cloud → Logins.`;
 
 // Hark-level behaviour, shared by chat jobs, scheduled tasks and cloud computer jobs.
+// v6.0: live test 2026-11-08 — a Hinglish task got its final answer in English; the language rule is now repeated every step
+const HI_SYS = '\nLANGUAGE: the user writes Roman Hinglish → every line you write for the user (intro, acks, FINAL answer) is Roman Hinglish (Hindi words in Latin letters, English words stay English). Never switch to pure English or Devanagari.';
 export const CORE_RULES = `HOW YOU TALK (like a sharp, honest friend)
 - Answer first, in 1–3 short lines. Then only the detail that helps. No filler ("Sure!", "Great question", "I hope this helps"), no step lists, no repeating the question.
 - Same language and script as the user: Roman Hinglish stays Roman Hinglish (never Devanagari unless they wrote it), English stays English.
@@ -636,7 +638,7 @@ export async function runAgent(ctx, task, opts = {}) {
         for (const c of contents.slice(1, -12)) { if (c._c) continue; c._c = 1; c.parts = (c.parts || []).filter(p => !p.inlineData || c === contents[contents.length - 1]).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 700) } } } : (p.functionCall && p.functionCall.name === 'write_file') ? { functionCall: { name: 'write_file', args: { path: p.functionCall.args.path, content: '(written, ' + String(p.functionCall.args.content || '').length + ' chars; read_file to see it)' } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
       }
       let resp;
-      try { resp = await ctx.llm(contents, tools, { rounds: 1, route: i === 0 && hasImg ? 'vision' : route, system: system + pinSys(), timeoutMs: route === 'code' ? 600000 : 120000, firstMs: i === 0 ? 8000 : route === 'code' ? 60000 : 20000, ...(i === 0 ? { race: true, fastFirst: true } : {}) }); llmFails = 0; }
+      try { resp = await ctx.llm(contents, tools, { rounds: 1, route: i === 0 && hasImg ? 'vision' : route, system: system + pinSys() + (lang === 'hi' ? HI_SYS : ''), timeoutMs: route === 'code' ? 600000 : 120000, firstMs: i === 0 ? 8000 : route === 'code' ? 60000 : 20000, ...(i === 0 ? { race: true, fastFirst: true } : {}) }); llmFails = 0; }
       catch (e) { // every free model busy: wait and retry this step instead of throwing the whole job away
         if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); for (let w = 0; w < [5, 15, 30][llmFails - 1] && !ctx.cancelled && !(ctx.inbox || []).length; w++) await new Promise(z => setTimeout(z, 1000)); i--; continue; }
         const made = files.length ? ' Jo files ban chuki hain woh neeche hain.' : '';
