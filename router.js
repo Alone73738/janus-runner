@@ -37,7 +37,7 @@ export const PROVIDERS = [
     vision: ['nvidia/nemotron-3.5-super-vl-120b-a12b', 'stepfun-ai/step-5-preview', 'google/gemma-4-31b-it'],
     fast: ['nvidia/nemotron-3.5-lightning-30b-a3b', 'minimaxai/minimax-m3.1-flash'] } },
   { id: 'groq', base: 'https://api.groq.com/openai/v1', rpm: 28, tpm: 7600, maxIn: 5500, inflight: 4, models: { // 8K TPM: short jobs only
-    fast: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'], code: ['openai/gpt-oss-120b'], main: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'], agent: ['openai/gpt-oss-120b'], research: ['openai/gpt-oss-120b'] } },
+    fast: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'], code: ['openai/gpt-oss-120b'], main: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'], agent: ['openai/gpt-oss-120b'], research: ['openai/gpt-oss-120b'], vision: ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'] } },
   { id: 'openrouter', base: 'https://openrouter.ai/api/v1', rpm: 18, inflight: 3, models: {
     main: ['nvidia/nemotron-3-ultra-550b-a55b:free'], code: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'cohere/north-mini-code:free'],
     vision: ['nvidia/nemotron-3.5-super-vl:free', 'google/gemma-4-31b-it:free'], fast: ['nvidia/nemotron-3.5-lightning:free'] } },
@@ -62,7 +62,7 @@ export const ROLE_ORDER = {
   main: ['nvidia', 'gemini', 'groq', 'mistral', 'openrouter', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
   code: ['nvidia', 'mistral', 'gemini', 'groq', 'openrouter', 'llm7', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova', 'cerebras'],
   agent: ['nvidia', 'gemini', 'groq', 'mistral', 'openrouter', 'zai', 'cfai', '*custom', 'kilo'],
-  vision: ['gemini', 'nvidia', 'zai', 'openrouter', 'mistral', 'hetzner', 'cfai', '*custom', 'kilo'],
+  vision: ['gemini', 'nvidia', 'groq', 'openrouter', 'zai', 'mistral', 'hetzner', 'cfai', '*custom', 'kilo'],
   research: ['nvidia', 'gemini', 'mistral', 'openrouter', 'groq', 'zai', 'hetzner', 'cfai', '*custom', 'kilo', 'sambanova'],
   long: ['gemini', 'nvidia', 'openrouter', 'mistral', '*custom', 'kilo'],
 };
@@ -79,7 +79,7 @@ export function classifyTask(text, { images = false, tokens = 0, build = false }
   return 'main';
 }
 export const PROVIDER_IDS = PROVIDERS.map(p => p.id);
-const VISION_OK = /gemma-4|vl|vision|kimi-k2\.6|glm-4\.6v|llama-4-scout|qwen3\.8|mistral-medium|step-5/i;
+const VISION_OK = /gemma-4|vl|vision|llama-4|kimi-k2\.6|glm-4\.6v|llama-4-scout|qwen3\.8|mistral-medium|step-5/i;
 
 const S = (o) => JSON.stringify(o);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -276,7 +276,9 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
           lim.take(p, tok); let ok = false, used = 0;
           try {
             const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, o) : await callOAI(p, m, contents, tools, o);
-            ok = true; used = parts.usage || 0; last = k2; log && log('model', k2); return { parts, model: k2 };
+            ok = true; used = parts.usage || 0;
+            if (o.accept && !o.accept(parts)) { errs.push(k2 + ':refused'); log && log('refused', k2); break; } // v5.5: e.g. a text-only model that says it cannot see the image → next model
+            last = k2; log && log('model', k2); return { parts, model: k2 };
           } catch (e) {
             const s = e.status; errs.push(k2 + ':' + s); if (s === 'cut' || s === 504) cutSeen = true; log && log('fail', k2 + ' ' + s + ' ' + String(e.message || '').slice(0, 80));
             if (s === 'timeout') slow.add(p.id);
@@ -294,6 +296,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
       }
       if (pass === 0) await sleep(Math.min(minWait, 20000));
     }
+    if (ai && o.route === 'vision') { try { const r = await workersVision(ai, contents, o.system); if (!o.accept || o.accept(r.parts)) { last = 'workers-ai-vision'; return { parts: r.parts, model: 'workers-ai-vision' }; } errs.push('workers-ai-vision:refused'); } catch (e) { errs.push('workers-ai-vision:' + String(e.message || e).slice(0, 40)); } }
     if (ai && o.route !== 'vision') { try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); } }
     throw new Error('All models failed: ' + errs.slice(-8).join(', '));
   }
@@ -315,6 +318,14 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
 }
 
 const WAI_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+/** v5.5: last vision fallback on the Worker itself (Llama 4 Scout reads images). */
+export async function workersVision(ai, contents, system) {
+  const messages = []; if (system) messages.push({ role: 'system', content: system });
+  for (const c of contents) { const content = []; for (const p of c.parts || []) { if (p.text) content.push({ type: 'text', text: p.text }); else if (p.inlineData && /^image\//.test(p.inlineData.mimeType || '')) content.push({ type: 'image_url', image_url: { url: 'data:' + p.inlineData.mimeType + ';base64,' + p.inlineData.data } }); } if (content.length) messages.push({ role: c.role === 'model' ? 'assistant' : 'user', content }); }
+  const r = await ai.run('@cf/meta/llama-4-scout-17b-16e-instruct', { messages, max_tokens: 1200 });
+  const txt = typeof r.response === 'string' ? r.response : S(r.response || r); if (!txt.trim()) throw new Error('empty');
+  return { parts: [{ text: txt }] };
+}
 async function workersAI(ai, contents, tools, system) {
   const messages = []; if (system) messages.push({ role: 'system', content: system });
   for (const c of contents) for (const p of c.parts || []) {
