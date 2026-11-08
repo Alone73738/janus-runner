@@ -213,12 +213,12 @@ export function banOf(u) { const h = host(u); for (const k of Object.keys(REGION
 export async function verifyPage(p, url, status, err) {
   if (err) return { ok: false, why: /ERR_NAME_NOT_RESOLVED/.test(err) ? 'site ka address nahi mila' : /TIMED_OUT|Timeout/i.test(err) ? 'site time pe load nahi hui' : err.slice(0, 60), title: '', n: 0 };
   let info = { t: '', n: 0, u: '', imgs: 0 };
-  for (let k = 0; k < 6; k++) { try { info = await p.evaluate(() => ({ t: document.title || '', n: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').trim().length, u: location.href, imgs: document.images.length + document.querySelectorAll('video,canvas,svg').length, txt: ((document.body && document.body.innerText) || '').slice(0, 1200) })); } catch { } if (info.n >= 40 || info.imgs >= 3) break; await new Promise(z => setTimeout(z, 700)); }
+  for (let k = 0; k < 6; k++) { try { info = await p.evaluate(() => { const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8; }; return { t: document.title || '', n: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').trim().length, u: location.href, imgs: document.images.length + document.querySelectorAll('video,canvas,svg').length, ctl: [...document.querySelectorAll('input:not([type=hidden]),textarea,select,[contenteditable=""],[contenteditable=true]')].filter(vis).length, txt: ((document.body && document.body.innerText) || '').slice(0, 1200) }; }); } catch { } if (info.n >= 40 || info.imgs >= 3 || info.ctl >= 1) break; await new Promise(z => setTimeout(z, 700)); }
   const wall = /captcha|verify you are (a )?human|are you a robot|unusual traffic|just a moment\.\.\.|access denied|attention required|request blocked|not available in your (country|region)|isn.t available in your/i.exec(info.t + ' ' + (info.txt || ''));
   if (/^chrome-error:|^about:blank/.test(info.u || '')) return { ok: false, why: 'page load nahi hua', title: info.t, n: 0 };
   if (status >= 400) return { ok: false, why: 'site ne HTTP ' + status + ' diya', title: info.t, n: info.n };
   if (wall) return { ok: false, why: 'page pe block/captcha hai ("' + wall[0] + '")', title: info.t, n: info.n, wall: true };
-  if (info.n < 40 && info.imgs < 3) return { ok: false, why: 'page khali (blank) aaya', title: info.t, n: info.n };
+  if (info.n < 40 && info.imgs < 3 && !(info.ctl >= 1)) return { ok: false, why: 'page khali (blank) aaya', title: info.t, n: info.n };
   return { ok: true, why: '', title: info.t, n: info.n };
 }
 /** One honest line when a site did not open (+ alternative). */
@@ -331,7 +331,7 @@ export function pageTools(ctx, getPage0, info) {
 // ---------------- v5.1: short human status lines (same wording as the phone) ----------------
 const SITE_NAMES = { 'tiktok.com': 'TikTok', 'youtube.com': 'YouTube', 'youtu.be': 'YouTube', 'google.com': 'Google', 'amazon.in': 'Amazon', 'amazon.com': 'Amazon', 'flipkart.com': 'Flipkart', 'instagram.com': 'Instagram', 'facebook.com': 'Facebook', 'x.com': 'X', 'twitter.com': 'X', 'linkedin.com': 'LinkedIn', 'github.com': 'GitHub', 'pinterest.com': 'Pinterest', 'reddit.com': 'Reddit', 'wikipedia.org': 'Wikipedia', 'duckduckgo.com': 'DuckDuckGo', 'bing.com': 'Bing', 'myntra.com': 'Myntra', 'croma.com': 'Croma', 'meesho.com': 'Meesho', 'vimeo.com': 'Vimeo' };
 export const isHing = (t) => /\b(hai|hain|karo|kardo|kar do|karke|karna|mujhe|mera|meri|kya|kaise|kyun|nahi|nhi|yr|yaar|bhai|kholo|khol|dhoondo|dhundo|dikhao|batao|wala|wali|aur|abhi|chahiye|lekin|bhi|sab|kuch|mein|yah|yaha|yahan|usme|isme|bata|bolo|ka|ke|ki|ko|se|pe|par)\b/i.test(String(t || ''));
-const siteName = (u) => { const k = siteKey(/^[a-z]+:\/\//i.test(String(u || '')) ? u : 'https://' + u); if (SITE_NAMES[k]) return SITE_NAMES[k]; const b = (k || 'site').split('.')[0]; return b.charAt(0).toUpperCase() + b.slice(1); };
+const siteName = (u) => { try { const h0 = new URL(/^[a-z]+:\/\//i.test(String(u || '')) ? u : 'https://' + u).host; if (/^[\d.]+(:\d+)?$|^localhost/.test(h0)) return h0; } catch { } const k = siteKey(/^[a-z]+:\/\//i.test(String(u || '')) ? u : 'https://' + u); if (SITE_NAMES[k]) return SITE_NAMES[k]; const b = (k || 'site').split('.')[0]; return b.charAt(0).toUpperCase() + b.slice(1); };
 const qq = (t, n = 34) => { t = String(t || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
 /** → [line, iconKind] */
 export function sayLine(name, a = {}, lang = 'en') {
