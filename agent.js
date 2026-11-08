@@ -96,6 +96,7 @@ export const CORE_RULES = `HOW YOU TALK (like a sharp, honest friend)
 - Before working: ONE short intro line saying what you do first, then act at once (no "should I?").
 - The FINAL reply is for the user, not a checker: result first in 1–3 lines (what you made/found and where it is, e.g. "**cube.mp4** ready ✓ — 5 sec, 640×640"). Never write a "Proof summary", logs, commands or step lists unless asked.
 HOW YOU WORK
+- "Impossible ko possible": NEVER answer "main nahi kar sakta" / "I can't" for things your tools allow — creating accounts (open the sign-up page in the browser, fill it, ask the user for every needed detail; nobody can type for you, so pick sensible defaults or say exactly which detail is missing), looking at attached photos (you can see them), downloads (download_file), installs and big software (install_packages / shell). Try with the tools first; only after a real attempt report a real blocker with the exact reason plus the next best path.
 - Plan → act → verify. For any multi-step task make a short plan in your head, do it step by step with tools, and CHECK the result (read the page, run the code, test the app) before you say it is done.
 - Never fake success. Say "done" only when your own steps prove it (page shows it was posted, build produced the file, test passed). If something failed, say exactly what failed and what the user can do.
 - Opening a site counts as done ONLY when the tool result shows the page really loaded (title + real text). If open_url says NOT LOADED / BLOCKED / blank / captcha / HTTP 4xx-5xx, never say it opened: say so in ONE honest line with the reason (e.g. "TikTok India mein band hai, isliye nahi khula") and offer an alternative.
@@ -427,7 +428,7 @@ export async function runSubAgents(ctx, list, parent = {}) {
       for (let k = 0; k < (x.steps || 14) && !result; k++) {
         if (cancelled || ctx.cancelled) { result = { ok: false, result: 'Stopped.' }; break; }
         if (Date.now() - t0 > deadline) { result = { ok: false, result: 'Time limit for this part reached (' + Math.round(deadline / 60000) + ' min). Partial: ' + clip(partsTextOf(contents), 600) }; break; }
-        const all = ctx.inboxAll || []; if (all.length > seen) { const add = all.slice(seen); seen = all.length; const last = contents[contents.length - 1]; const note = { text: '[The user added while you work — follow it if it concerns your part]: ' + add.join(' | ') }; if (last.role === 'user') last.parts.push(note); else contents.push({ role: 'user', parts: [note] }); }
+        const all = ctx.inboxAll || []; if (all.length > seen) { const add = all.slice(seen).filter(t => !/^\u0001CHAT:/.test(String(t))).map(t => String(t).replace(/^\u0001STEER:/, '')); seen = all.length; if (add.length) { const last = contents[contents.length - 1]; const note = { text: '[STEER from the main agent — the user changed the job, follow it if it concerns your part]: ' + add.join(' | ') }; if (last.role === 'user') last.parts.push(note); else contents.push({ role: 'user', parts: [note] }); } }
         const r = await ctx.llm(contents, tools, { route: gotPage ? 'agent' : (/research|compare|tulna|review|analy/i.test(String(parent.task || '') + ' ' + task) ? 'research' : 'fast'), system, timeoutMs: 90000, firstMs: 20000, spread: i + 1, maxTokens: 4096 });
         const parts = (r.parts || []).filter(p => p.text || p.functionCall); if (!parts.length) parts.push({ text: '' });
         contents.push({ role: 'model', parts });
@@ -586,15 +587,16 @@ export async function runAgent(ctx, task, opts = {}) {
   } else contents = [{ role: 'user', parts: [{ text: 'Do the task now.' }] }];
   const hasImg = contents.some(c => (c.parts || []).some(p => p.inlineData));
   let result = null, nudges = 0, checks = 0, cont = null, cutHint = false, hintNow = false, llmFails = 0, introSent = !!opts.state;
-  let delivered = false, afterDel = 0; // v5.3: stop once the requested file is delivered (+ verified once)
+  let delivered = false, afterDel = 0, refuseNudged = false; // v5.3: stop once the requested file is delivered (+ verified once)
   const tools = TOOLS.filter(t => (ctx.runCode || !RUNNER_ONLY.includes(t.name)) && (t.name !== 'write_file' || ctx.fs) && (t.name !== 'test_web_app' || ctx.testWebApp)).concat(ctx.mcpTools || []);
   // v5.2 main-agent inbox: every message the user sends while we work is read before the next step
   let pendingAck = false;
   const takeInbox = () => { const l = (ctx.inbox || []).splice(0); return l.filter(x => String(x || '').trim()); };
   const addInbox = (l, intoParts) => {
-    const txt = l.map(t => '[NEW MESSAGE from the user while you work — treat it as a correction, an addition or a stop; first write ONE short line acknowledging it in their language, then continue with the updated job]: ' + t).join('\n');
+    const txt = l.map(t => { t = String(t); if (/^\u0001STEER:/.test(t)) return '[STEER — the user changed the job while you work; JANUS already answered them in the chat, so do NOT acknowledge it, just apply it to the running work now]: ' + t.slice(7); if (/^\u0001CHAT:/.test(t)) return '[FYI the user also said this (already answered in the chat; it does not change the task, do not reply to it)]: ' + t.slice(6); return '[NEW MESSAGE from the user while you work — treat it as a correction, an addition or a stop; first write ONE short line acknowledging it in their language, then continue with the updated job]: ' + t; }).join('\n');
+    const legacy = l.some(t => !/^\u0001(STEER|CHAT):/.test(String(t)));
     if (intoParts) intoParts.push({ text: txt }); else { const last = contents[contents.length - 1]; if (last && last.role === 'user') last.parts.push({ text: txt }); else contents.push({ role: 'user', parts: [{ text: txt }] }); }
-    pendingAck = true; steps.push({ tool: 'inbox', args: {}, out: clip(l.join(' | '), 200) });
+    pendingAck = legacy; steps.push({ tool: 'inbox', args: {}, out: clip(l.join(' | '), 200) });
   };
   const waitIfPaused = async () => { let n = 0; while (ctx.pausedUntil && ctx.pausedUntil > ctx.now() && !ctx.cancelled && n++ < 600) { if (n === 1) await progress({ label: lang === 'hi' ? 'Aap browser chala rahe ho — ruka hua hun' : 'You are using the browser — paused', kind: 'eye', step: stepNo }); await new Promise(z => setTimeout(z, 500)); } };
   // v5.3: tap on an expired browser card → reopen the same pages (no model)
@@ -648,6 +650,7 @@ export async function runAgent(ctx, task, opts = {}) {
       if (!calls.length && (ctx.inbox || []).length) { continue; } // a new message arrived while the model answered: read it first
       if (!calls.length) {
         const t = parts.map(p => p.text || '').join('').trim();
+        if (t && !refuseNudged && REFUSE_RX.test(t) && !steps.some(s => !['inbox', 'checker'].includes(s.tool))) { refuseNudged = true; contents.push({ role: 'user', parts: [{ text: REFUSE_NUDGE }] }); continue; } // v5.5: refusal without trying a tool → do it
         if (opts.chat && t) {
           const acted = steps.some(s => BROWSER.includes(s.tool) || ['run_code', 'write_file', 'upload_image', 'install_packages'].includes(s.tool));
           if (acted && checks < 2 && !(delivered && checks >= 1)) { const v = await verify(ctx, task, steps, t, tests); if (!v.ok) { checks++; steps.push({ tool: 'checker', args: {}, out: clip('rejected: ' + v.reason, 200) }); contents.push({ role: 'user', parts: [{ text: 'CHECKER: not done yet — ' + v.reason + '. Do the missing part now, or reply honestly with what could not be done.' }] }); continue; } }
@@ -665,6 +668,7 @@ export async function runAgent(ctx, task, opts = {}) {
         const { name, args = {} } = c.functionCall;
         if (name === 'finish') {
           const claim = { success: args.success !== false, result: String(args.result || '') };
+          if (!refuseNudged && REFUSE_RX.test(claim.result) && !steps.some(s => !['inbox', 'checker', 'finish'].includes(s.tool))) { refuseNudged = true; outs.push({ functionResponse: { name, response: { result: 'NOT ACCEPTED: ' + REFUSE_NUDGE } } }); continue; }
           if (claim.success && delivered && checks >= 1) { /* deliverable sent and already checked once: accept */ }
           else if (claim.success && checks < 2) {
             await progress({ label: label('finish', {}), kind: 'ok', step: stepNo });
@@ -709,6 +713,8 @@ export async function runAgent(ctx, task, opts = {}) {
   return { ...result, steps, images: images.concat(lastShot && !opts.chat ? [lastShot] : []).filter((x, i, a) => a.indexOf(x) === i).slice(-6), files: files.filter((x, i, a) => a.indexOf(x) === i).slice(-8), model: ctx.llm.lastModel && ctx.llm.lastModel() };
 }
 
+export const REFUSE_RX = /(nahi kar (sakta|sakti|paunga|paungi|payega)|nahin kar sakta|mere paas[^.\n]{0,40}(tool|access|ability|capability)[^.\n]{0,20}nahi|image analysis tool|directly dekh[^.\n]{0,30}nahi|dekh nahi (sakta|sakti)|\bi (cannot|can't|can not|am unable to|am not able to|don't have the ability to)\b[^.\n]{0,40}\b(see|view|analy[sz]e|identify|open|look at|access|create|do|help|make|download|install|sign up|register)|\bas an ai\b|i (do not|don't) have (access to|the ability|tools?)|unable to (view|see|process) (the |this )?image|no image (was )?(attached|provided|shared))/i;
+const REFUSE_NUDGE = 'You DO have the tools for this (real browser: open_url/list_elements/click_element/type_into, download_file, install_packages/shell on the cloud computer; attached images are visible to you). Do NOT refuse. Do it now with the tools; only if a real blocker remains after trying, say the exact reason in one line plus the next best path.';
 const OPEN_CLAIM = /(open|khul|khol)\s*(ho\s*gay|gay|ho\s*chuk|kar\s*diy|ed\b)|\bis (now )?open|\bopened\b/i;
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'the site'; } };
 
