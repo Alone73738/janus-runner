@@ -313,7 +313,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     const o = typeof opts === 'string' ? { route: opts } : { ...opts };
     if (!o.route) o.route = 'main';
     let lastErr;
-    const waits = o.rounds === 0 ? [] : o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000]; // v6.0: rounds:0 = one pass, no sleeping retries (vision/conductor/intro calls have their own fallback)
+    const waits = (o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000]).slice(0, o.rounds == null ? 9 : o.rounds); // v6.0: rounds:0 = one pass, no sleeping retries (vision/conductor/intro calls have their own fallback)
     for (let round = 0; round <= waits.length; round++) {
       try { return await once(contents, tools, o); } catch (e) { lastErr = e; log && log('round-fail', round + ' ' + String(e.message || e).slice(0, 140)); if (round < waits.length) { await sleep(waits[round]); cool.clear(); } }
     }
