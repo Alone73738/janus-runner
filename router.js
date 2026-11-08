@@ -13,7 +13,7 @@ export const GEMINI = {
   research: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'],
   long: ['gemini-3.8-flash', 'gemini-3.6-flash'],
   code: ['gemini-3.8-flash', 'gemini-3.6-flash'],
-  vision: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'],
+  vision: ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'], // v5.5: 3.6 Flash answers a photo in ~4 s (3.8 often 20 s+)
   fast: ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'],
 };
 export const GEMINI_MODELS = [...new Set([...GEMINI.main, ...GEMINI.fast, 'gemma-4-26b-a4b-it'])];
@@ -238,6 +238,7 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     const gemma = m.startsWith('gemma');
     const cts = contents.map(c => ({ role: c.role, parts: (c.parts || []).filter(p => !(gemma && p.inlineData)).map(p => p.thoughtSignature && last !== 'gemini:' + m ? { ...p, thoughtSignature: 'skip_thought_signature_validator' } : p) })).map(c => c.parts.length ? c : { role: c.role, parts: [{ text: '…' }] });
     const body = { contents: cts, generationConfig: { temperature: o.temperature ?? 0.3, maxOutputTokens: gemma ? 8192 : (o.maxTokens || 16384) } };
+    if (o.think && !gemma) body.generationConfig.thinkingConfig = { thinkingLevel: o.think }; // v5.5: vision answers with low thinking = seconds, not tens of seconds
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     if (tools && tools.length) body.tools = [{ functionDeclarations: tools }];
     const headers = { 'content-type': 'application/json' }; if (geminiKeyInHeader && keys.gemini) headers['x-goog-api-key'] = keys.gemini;
@@ -251,13 +252,14 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     const errs = []; const slow = new Set(); const tok = estTokens(contents, o.system, tools);
     if (tok > 100000 && o.route !== 'vision' && o.route !== 'long') o = { ...o, route: 'long' }; // very long context → 1M-context models first
     let list = expand(o.route || 'main');
+    if (o.only) list = list.filter(x => o.only.includes(x.m)); // v5.5: pin a call to given models (vision race)
     if (o.spread && list.length > 1) { const provs = [...new Set(list.map(x => x.p.id))]; const lead = provs[o.spread % Math.min(provs.length, 3)]; list = [...list.filter(x => x.p.id === lead), ...list.filter(x => x.p.id !== lead)]; }
     if (o.race && !o._raced) { // v5.4: first step — race the first 2 ready providers, take the first answer
       const ready = []; const seen = new Set();
       for (const x of list) { const k2 = x.p.id + ':' + x.m; if (seen.has(x.p.id) || (cool.get(k2) || 0) > Date.now() || (x.p.maxIn && tok > x.p.maxIn) || lim.wait(x.p, tok) > 0 || (live[x.p.id] && !live[x.p.id].has(x.m))) continue; seen.add(x.p.id); ready.push(x); if (ready.length === 2) break; }
       if (ready.length === 2) {
         const ac = new AbortController(); const t0 = Date.now();
-        const go = async ({ p, m }) => { const k2 = p.id + ':' + m; lim.take(p, tok); let ok = false, used = 0; try { const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, { ...o, signal: ac.signal }) : await callOAI(p, m, contents, tools, { ...o, signal: ac.signal }); ok = true; used = parts.usage || 0; return { parts, model: k2 }; } catch (e) { if (!ac.signal.aborted || e.status !== 'timeout') { errs.push(k2 + ':' + e.status); if (e.status === 429) lim.block(p, e.retryAfter ? e.retryAfter * 1000 : 20000); else if (e.status === 'timeout') cool.set(k2, Date.now() + 5 * 60e3); else if (e.status === 401 && p.kind !== 'gemini') lim.block(p, 6 * 3600e3); } throw e; } finally { lim.done(p, ok ? used : 0); } };
+        const go = async ({ p, m }) => { const k2 = p.id + ':' + m; lim.take(p, tok); let ok = false, used = 0; try { const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, { ...o, signal: ac.signal }) : await callOAI(p, m, contents, tools, { ...o, signal: ac.signal }); ok = true; used = parts.usage || 0; if (o.accept && !o.accept(parts)) throw Object.assign(new Error('refused'), { status: 'refused' }); return { parts, model: k2 }; } catch (e) { if (!ac.signal.aborted || e.status !== 'timeout') { errs.push(k2 + ':' + e.status); if (e.status === 429) lim.block(p, e.retryAfter ? e.retryAfter * 1000 : 20000); else if (e.status === 'timeout') cool.set(k2, Date.now() + 5 * 60e3); else if (e.status === 401 && p.kind !== 'gemini') lim.block(p, 6 * 3600e3); } throw e; } finally { lim.done(p, ok ? used : 0); } };
         try { const w = await Promise.any(ready.map(go)); ac.abort('won'); last = w.model; log && log('model', w.model + ' (race ' + (Date.now() - t0) + 'ms)'); return w; } catch { log && log('race-fail', errs.join(',') + ' ' + (Date.now() - t0) + 'ms'); }
         o = { ...o, _raced: true };
       }
