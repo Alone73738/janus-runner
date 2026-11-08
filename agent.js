@@ -35,6 +35,7 @@ export const TOOLS = [
   { name: 'spawn_agents', description: 'Run several sub-agents AT THE SAME TIME, each on one independent part of the job, each working in its own TAB of the one cloud browser the user watches. "5 browser kholo, har ek me ye karo" → exactly 5 tasks with browser=true. Research / compare / check several shops, sites or topics → split it yourself into as many agents as the job needs (no fixed limit; tabs beyond the machine RAM simply queue). Each has web_search/read_url and, when browser=true, its own browser tab. They return short summaries; you then merge them into one answer. task = complete self-contained instructions for that part; title = 2–4 words.', parameters: { type: 'object', properties: { tasks: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, task: { type: 'string' }, browser: { type: 'boolean' } }, required: ['task'] } } }, required: ['tasks'] } },
   { name: 'download_file', description: 'Download a file or a public video the user asked for (YouTube/Shorts, Instagram, X, Vimeo, Facebook, Reddit pages via yt-dlp; direct file links via HTTP) into the work folder; it is sent back to the user automatically as a file in the chat. url = the exact video page or file link (find it first). name = optional file name like "zach-king-short.mp4". Max ~24 MB (videos are fetched at ≤720p).', parameters: { type: 'object', properties: { url: { type: 'string' }, name: { type: 'string' } }, required: ['url'] } },
   { name: 'open_tabs', description: 'Open several web pages at once, each in a new tab of the cloud browser the user watches (e.g. "10 tabs mein Pinterest kholo" → 10 urls). Fast: no sub-agents. Returns each tab title. Use spawn_agents instead when every tab needs real work.', parameters: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, required: ['urls'] } },
+  { name: 'request_details', description: 'Ask the user for details ONLY THEY can give (name, date of birth, which account, a choice between options, a missing file) when you cannot continue without them. Do everything you can first (open the page, fill what you know). Ends this turn with your question; the user answers in the next message and you continue.', parameters: { type: 'object', properties: { question: { type: 'string', description: 'one short question in the user language' }, fields: { type: 'array', items: { type: 'string' }, description: 'exact details needed, e.g. ["Full name", "Date of birth"]' }, done_so_far: { type: 'string', description: 'one line: what is already done' } }, required: ['question'] } },
   { name: 'finish', description: 'The task is done (or truly impossible). result = the final short answer for the user in their language.', parameters: { type: 'object', properties: { result: { type: 'string' }, success: { type: 'boolean' } }, required: ['result', 'success'] } },
 ];
 const RUNNER_ONLY = ['run_code', 'install_packages', 'write_file', 'read_file', 'test_web_app', 'shell', 'edit_file', 'send_file', 'save_skill', 'load_skill'];
@@ -99,6 +100,7 @@ export const CORE_RULES = `HOW YOU TALK (like a sharp, honest friend)
 - The FINAL reply is for the user, not a checker: result first in 1–3 lines (what you made/found and where it is, e.g. "**cube.mp4** ready ✓ — 5 sec, 640×640"). Never write a "Proof summary", logs, commands or step lists unless asked.
 HOW YOU WORK
 - "Impossible ko possible": NEVER answer "main nahi kar sakta" / "I can't" for things your tools allow — creating accounts (open the sign-up page in the browser, fill it, ask the user for every needed detail; nobody can type for you, so pick sensible defaults or say exactly which detail is missing), looking at attached photos (you can see them), downloads (download_file), installs and big software (install_packages / shell). Try with the tools first; only after a real attempt report a real blocker with the exact reason plus the next best path.
+- Missing a detail only the user has (their name, DOB, which account, a choice)? Do everything else first, then call request_details with one short question + the exact fields. Never refuse, never invent personal details.
 - Plan → act → verify. For any multi-step task make a short plan in your head, do it step by step with tools, and CHECK the result (read the page, run the code, test the app) before you say it is done.
 - Never fake success. Say "done" only when your own steps prove it (page shows it was posted, build produced the file, test passed). If something failed, say exactly what failed and what the user can do.
 - Opening a site counts as done ONLY when the tool result shows the page really loaded (title + real text). If open_url says NOT LOADED / BLOCKED / blank / captcha / HTTP 4xx-5xx, never say it opened: say so in ONE honest line with the reason (e.g. "TikTok India mein band hai, isliye nahi khula") and offer an alternative.
@@ -364,6 +366,7 @@ export function sayLine(name, a = {}, lang = 'en') {
     case 'install_packages': return [H('Tools install kar raha hun', 'Installing tools'), 'down'];
     case 'test_web_app': return [H('Phone screen pe test kar raha hun', 'Testing on a phone screen'), 'eye'];
     case 'finish': return [H('Result check kar raha hun', 'Checking the result'), 'ok'];
+    case 'request_details': return [H('Aapse kuch details chahiye', 'Need a few details from you'), 'spark'];
     case '_mcp': return [H('Tool chala raha hun', 'Using a tool'), 'spark'];
     case '_start': return [H('Shuru kar raha hun', 'Starting'), 'spark'];
     case '_wait': return [H('AI models busy hain, ek minute', 'AI models are busy, one minute'), 'spark'];
@@ -671,6 +674,11 @@ export async function runAgent(ctx, task, opts = {}) {
       const outs = [];
       for (const c of calls) {
         const { name, args = {} } = c.functionCall;
+        if (name === 'request_details') { // v6.0: honest "I need X from you" instead of refusing or guessing
+          const fl = (Array.isArray(args.fields) ? args.fields : []).map(x => clip(String(x), 60)).filter(Boolean).slice(0, 8);
+          const q = [args.done_so_far ? clip(String(args.done_so_far), 200) : '', clip(String(args.question || ''), 300), fl.length ? fl.map(x => '- ' + x).join('\n') : ''].filter(Boolean).join('\n\n');
+          steps.push({ tool: 'request_details', args: { fields: fl }, out: clip(q, 200) }); result = { success: true, result: q || (lang === 'hi' ? 'Aage badhne ke liye thodi details chahiye.' : 'I need a few details to continue.'), ask: true, keepTabs: true }; break;
+        }
         if (name === 'finish') {
           const claim = { success: args.success !== false, result: String(args.result || '') };
           if (!refuseNudged && REFUSE_RX.test(claim.result) && !steps.some(s => !['inbox', 'checker', 'finish'].includes(s.tool))) { refuseNudged = true; outs.push({ functionResponse: { name, response: { result: 'NOT ACCEPTED: ' + REFUSE_NUDGE } } }); continue; }
