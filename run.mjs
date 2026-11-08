@@ -179,7 +179,7 @@ async function runJob(pay, jobId, carry) {
   }
   const fileUrl = base + '/runner/file';
   const saveHome = async () => { // v5.3: keep the workspace for the next chat (only when it changed)
-    try { const pk = await packHome(); if (!pk || pk.hash === globalThis.__homeHash) return; const id = await upload({ bytes: readFileSync(pk.path), mime: 'application/gzip' }, 'home.tgz'); const o = await post('/runner/blob', { run: job.run, op: 'put-home', id, hash: pk.hash, files: pk.files }, true); if (o.ok) { globalThis.__homeHash = pk.hash; globalThis.__homeTs = Date.now(); } } catch { }
+    try { const pk = await packHome(globalThis.__homeHash); if (!pk || pk.unchanged || pk.hash === globalThis.__homeHash) return; const id = await upload({ bytes: readFileSync(pk.path), mime: 'application/gzip' }, 'home.tgz'); const o = await post('/runner/blob', { run: job.run, op: 'put-home', id, hash: pk.hash, files: pk.files }, true); if (o.ok) { globalThis.__homeHash = pk.hash; globalThis.__homeTs = Date.now(); } } catch { }
   };
   const upload = async (f, name) => { const q = new URLSearchParams({ run: job.run, t: job.ft, name: name || f.name || 'file', mime: f.mime || 'application/octet-stream' }); const r = await fetch(fileUrl + '?' + q, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f.bytes }); if (!r.ok) throw new Error('upload ' + r.status); return (await r.json()).id; };
   if (res.cont) { // pack the work folder for the next runner (≤ 24 MB)
@@ -191,13 +191,13 @@ async function runJob(pay, jobId, carry) {
   const seenNames = new Set(); for (const id of (res.files || []).slice().reverse()) { const f = images.get(id); const nm = f && f.name; if (!nm || seenNames.has(nm) || seenNames.size >= 8 || !job.ft) continue; seenNames.add(nm);
     try { outFiles.push({ id: await upload(f), name: nm, mime: f.mime, bytes: f.bytes.length }); } catch { } }
   res.files = outFiles;
-  if (chat && !res.cont) await saveHome();
+  // v6.0: the workspace is saved AFTER the reply is posted (packing + uploading home.tgz used to delay every reply by seconds)
   const steps = (res.steps || []).slice(-60);
   const stay = WARM && !chromeXUsed(pay);
   const body = await seal({ run: job.run, job: jobId, stay, ...res, steps, result: String(res.result || '').slice(0, 12000), images: imgs.slice(0, 6), cookies: outCookies, started, finished: Date.now(), ...(finalTabs || {}) });
   let last = '';
   for (let i = 0; i < 4; i++) {
-    try { const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: body }) }); if (r.ok) { say(res.cont ? 'ok: continue' : res.success ? 'ok' : 'fail'); return stay ? (ctx && ctx.session ? ctx : true) : false; } last = 'http ' + r.status; } catch (e) { last = String(e && e.message || e).slice(0, 80); }
+    try { const r = await fetch(job.cb, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: body }) }); if (r.ok) { say(res.cont ? 'ok: continue' : res.success ? 'ok' : 'fail'); if (chat && !res.cont) { const th = Date.now(); await saveHome(); say('home saved in ' + (Date.now() - th) + ' ms'); } return stay ? (ctx && ctx.session ? ctx : true) : false; } last = 'http ' + r.status; } catch (e) { last = String(e && e.message || e).slice(0, 80); }
     await sleep(3000 * (i + 1));
   }
   try { // tell the app why, with a tiny body
