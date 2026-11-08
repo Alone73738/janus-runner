@@ -241,25 +241,32 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
     if (o.think && !gemma) body.generationConfig.thinkingConfig = { thinkingLevel: o.think }; // v5.5: vision answers with low thinking = seconds, not tens of seconds
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     if (tools && tools.length) body.tools = [{ functionDeclarations: tools }];
+    else if (o.search) body.tools = [{ googleSearch: {} }]; // v6.0: grounded lookup (e.g. model code → product name)
     const headers = { 'content-type': 'application/json' }; if (geminiKeyInHeader && keys.gemini) headers['x-goog-api-key'] = keys.gemini;
     const r = await fetchImpl(`${geminiBase}/v1beta/models/${m}:generateContent`, { method: 'POST', headers, body: S(body), signal: o.signal && AbortSignal.any ? AbortSignal.any([o.signal, AbortSignal.timeout(o.fastFirst ? Math.max(15000, (o.firstMs || 8000) * 2) : (o.timeoutMs || 180000))]) : AbortSignal.timeout(o.fastFirst ? Math.max(15000, (o.firstMs || 8000) * 2) : (o.timeoutMs || 180000)) }).catch(() => { throw Object.assign(new Error('gemini timeout'), { status: 'timeout' }); });
-    if (!r.ok) { const t = await r.text().catch(() => ''); throw Object.assign(new Error('gemini ' + r.status + ' ' + t.slice(0, 120)), { status: r.status, daily: /per ?day/i.test(t) }); }
+    if (!r.ok) { const t = await r.text().catch(() => ''); const rd = /"retryDelay":\s*"(\d+)/.exec(t); throw Object.assign(new Error('gemini ' + r.status + ' ' + t.slice(0, 120)), { status: r.status, daily: /per ?day|PerDay/i.test(t), retryAfter: rd ? Math.min(+rd[1] + 1, 3600) : 0 }); }
     const j = await r.json(); const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
     if (!parts || !parts.length) throw Object.assign(new Error('gemini empty'), { status: 'empty' });
+    if (o.search) { const gm = j.candidates[0].groundingMetadata || {}; parts.grounded = (gm.groundingChunks || []).map(c => c.web && c.web.title || '').filter(Boolean).slice(0, 8); } // v6.0: titles of the pages the search really used
     return parts;
   }
   async function once(contents, tools, o) {
     const errs = []; const slow = new Set(); const tok = estTokens(contents, o.system, tools);
     if (tok > 100000 && o.route !== 'vision' && o.route !== 'long') o = { ...o, route: 'long' }; // very long context → 1M-context models first
     let list = expand(o.route || 'main');
-    if (o.only) list = list.filter(x => o.only.includes(x.m)); // v5.5: pin a call to given models (vision race)
+    if (o.only) { // v5.5: pin a call to given models; v6.0: found in ANY role (a pinned id outside this role used to empty the list → silent Workers AI answer)
+      const seen = new Set(); list = [];
+      for (const r of [o.route || 'main', 'main', 'fast', 'vision', 'code', 'long']) for (const x of expand(r)) { const k = x.p.id + ':' + x.m; if (o.only.includes(x.m) && !seen.has(k)) { seen.add(k); list.push(x); } }
+      list.sort((a, b) => o.only.indexOf(a.m) - o.only.indexOf(b.m)); if (!list.length) throw new Error('pinned models unavailable: ' + o.only.join(','));
+    }
+    if (o.prefer) { const ix = (m) => { const i = o.prefer.indexOf(m); return i < 0 ? 999 : i; }; list = list.map((x, i) => [x, i]).sort((a, b) => ix(a[0].m) - ix(b[0].m) || a[1] - b[1]).map(x => x[0]); } // v6.0: try these models first (e.g. 3.6 Flash before the slow 3.8 for chat)
     if (o.spread && list.length > 1) { const provs = [...new Set(list.map(x => x.p.id))]; const lead = provs[o.spread % Math.min(provs.length, 3)]; list = [...list.filter(x => x.p.id === lead), ...list.filter(x => x.p.id !== lead)]; }
     if (o.race && !o._raced) { // v5.4: first step — race the first 2 ready providers, take the first answer
       const ready = []; const seen = new Set();
       for (const x of list) { const k2 = x.p.id + ':' + x.m; if (seen.has(x.p.id) || (cool.get(k2) || 0) > Date.now() || (x.p.maxIn && tok > x.p.maxIn) || lim.wait(x.p, tok) > 0 || (live[x.p.id] && !live[x.p.id].has(x.m))) continue; seen.add(x.p.id); ready.push(x); if (ready.length === 2) break; }
       if (ready.length === 2) {
         const ac = new AbortController(); const t0 = Date.now();
-        const go = async ({ p, m }) => { const k2 = p.id + ':' + m; lim.take(p, tok); let ok = false, used = 0; try { const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, { ...o, signal: ac.signal }) : await callOAI(p, m, contents, tools, { ...o, signal: ac.signal }); ok = true; used = parts.usage || 0; if (o.accept && !o.accept(parts)) throw Object.assign(new Error('refused'), { status: 'refused' }); return { parts, model: k2 }; } catch (e) { if (!ac.signal.aborted || e.status !== 'timeout') { errs.push(k2 + ':' + e.status); if (e.status === 429) lim.block(p, e.retryAfter ? e.retryAfter * 1000 : 20000); else if (e.status === 'timeout') cool.set(k2, Date.now() + 5 * 60e3); else if (e.status === 401 && p.kind !== 'gemini') lim.block(p, 6 * 3600e3); } throw e; } finally { lim.done(p, ok ? used : 0); } };
+        const go = async ({ p, m }) => { const k2 = p.id + ':' + m; lim.take(p, tok); let ok = false, used = 0; try { const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, { ...o, signal: ac.signal }) : await callOAI(p, m, contents, tools, { ...o, signal: ac.signal }); ok = true; used = parts.usage || 0; if (o.accept && !o.accept(parts)) throw Object.assign(new Error('refused'), { status: 'refused' }); return { parts, model: k2 }; } catch (e) { if (!ac.signal.aborted || e.status !== 'timeout') { errs.push(k2 + ':' + e.status); if (e.status === 429) { if (p.kind === 'gemini') cool.set(k2, Date.now() + (e.retryAfter ? e.retryAfter * 1000 : e.daily ? 3 * 3600e3 : 30000)); else lim.block(p, e.retryAfter ? e.retryAfter * 1000 : 20000); } else if (e.status === 'timeout') cool.set(k2, Date.now() + 5 * 60e3); else if (e.status === 401 && p.kind !== 'gemini') lim.block(p, 6 * 3600e3); } throw e; } finally { lim.done(p, ok ? used : 0); } };
         try { const w = await Promise.any(ready.map(go)); ac.abort('won'); last = w.model; log && log('model', w.model + ' (race ' + (Date.now() - t0) + 'ms)'); return w; } catch { log && log('race-fail', errs.join(',') + ' ' + (Date.now() - t0) + 'ms'); }
         o = { ...o, _raced: true };
       }
@@ -280,12 +287,12 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
             const parts = p.kind === 'gemini' ? await callGemini(m, contents, tools, o) : await callOAI(p, m, contents, tools, o);
             ok = true; used = parts.usage || 0;
             if (o.accept && !o.accept(parts)) { errs.push(k2 + ':refused'); log && log('refused', k2); break; } // v5.5: e.g. a text-only model that says it cannot see the image → next model
-            last = k2; log && log('model', k2); return { parts, model: k2 };
+            last = k2; log && log('model', k2); return { parts, model: k2, grounded: parts.grounded };
           } catch (e) {
             const s = e.status; errs.push(k2 + ':' + s); if (s === 'cut' || s === 504) cutSeen = true; log && log('fail', k2 + ' ' + s + ' ' + String(e.message || '').slice(0, 80));
             if (s === 'timeout') slow.add(p.id);
             if (s === 401 && p.kind !== 'gemini') { lim.block(p, 6 * 3600e3); break; } // bad key: skip the whole provider
-            if (s === 429) { lim.block(p, e.retryAfter ? e.retryAfter * 1000 : e.daily ? 3 * 3600e3 : 20000); break; } // switch provider on 429
+            if (s === 429) { if (p.kind === 'gemini') cool.set(k2, Date.now() + (e.retryAfter ? e.retryAfter * 1000 : e.daily ? 3 * 3600e3 : 30000)); else lim.block(p, e.retryAfter ? e.retryAfter * 1000 : e.daily ? 3 * 3600e3 : 20000); break; } // v6.0: Gemini quotas are PER MODEL → a 429 cools that model only (it used to block every Gemini model for 20 s)
             if ((s >= 500 || s === 'empty') && attempt < 1 && list.length < 3) { await sleep(1500); continue; }
             cool.set(k2, Date.now() + (s === 404 || s === 403 || s === 401 ? 6 * 3600e3 : s === 'timeout' ? 10 * 60e3 : s === 'cut' ? 20e3 : s === 400 ? 0 : 2 * 60e3));
             break;
@@ -298,15 +305,15 @@ export function makeRouter({ keys = {}, ai = null, fetchImpl = fetch, geminiBase
       }
       if (pass === 0) await sleep(Math.min(minWait, 20000));
     }
-    if (ai && o.route === 'vision') { try { const r = await workersVision(ai, contents, o.system); if (!o.accept || o.accept(r.parts)) { last = 'workers-ai-vision'; return { parts: r.parts, model: 'workers-ai-vision' }; } errs.push('workers-ai-vision:refused'); } catch (e) { errs.push('workers-ai-vision:' + String(e.message || e).slice(0, 40)); } }
-    if (ai && o.route !== 'vision') { try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); } }
+    if (ai && o.route === 'vision' && !o.only) { try { const r = await workersVision(ai, contents, o.system); if (!o.accept || o.accept(r.parts)) { last = 'workers-ai-vision'; return { parts: r.parts, model: 'workers-ai-vision' }; } errs.push('workers-ai-vision:refused'); } catch (e) { errs.push('workers-ai-vision:' + String(e.message || e).slice(0, 40)); } }
+    if (ai && o.route !== 'vision' && !o.only) { try { const r = await workersAI(ai, contents, tools, o.system); last = 'workers-ai'; return { parts: r.parts, model: 'workers-ai' }; } catch (e) { errs.push('workers-ai:' + String(e.message || e).slice(0, 40)); } }
     throw new Error('All models failed: ' + errs.slice(-8).join(', '));
   }
   const llm = async (contents, tools, opts = {}) => {
     const o = typeof opts === 'string' ? { route: opts } : { ...opts };
     if (!o.route) o.route = 'main';
     let lastErr;
-    const waits = o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000];
+    const waits = o.rounds === 0 ? [] : o.route === 'fast' ? [3000, 8000] : [10000, 25000, 45000]; // v6.0: rounds:0 = one pass, no sleeping retries (vision/conductor/intro calls have their own fallback)
     for (let round = 0; round <= waits.length; round++) {
       try { return await once(contents, tools, o); } catch (e) { lastErr = e; log && log('round-fail', round + ' ' + String(e.message || e).slice(0, 140)); if (round < waits.length) { await sleep(waits[round]); cool.clear(); } }
     }
