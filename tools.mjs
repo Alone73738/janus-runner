@@ -78,13 +78,14 @@ function wsSummary() {
   const ins = installs.get(); const ks = skills.list();
   return { top, inputs, installs: ins, skills: ks.map(k => ({ name: k.name, description: k.description, own: k.own })) };
 }
-async function packHome() { // → {path, bytes, hash} or null
+async function packHome(prevHash) { // → {path, bytes, hash} or null; v6.0: hash first (cheap), tar only when something changed
+  const h = await sh('bash', ['-c', `cd "${WD}" && find . -type f ! -path './inputs/*' ! -path './.cache/*' ! -path './.npm/*' ! -name '_main.*' -printf '%p %s %T@\\n' 2>/dev/null | sort | md5sum | cut -c1-32; find . -type f ! -path './inputs/*' 2>/dev/null | wc -l`]);
+  const [hash, files] = h.out.trim().split('\n'); if (prevHash && hash === prevHash) return { hash, unchanged: true };
   const ex = ['--exclude=./inputs', '--exclude=./_main.*', '--exclude=./.cache', '--exclude=./.npm', '--exclude=./.gradle', '--exclude=./.android', '--exclude=*/node_modules/.cache', '--exclude=./.local/lib/python3*/site-packages', '--exclude=./.local/lib/node_modules'];
   let t = await sh('tar', [...ex, '-czf', '/tmp/home.tgz', '-C', WD, '.']); let st; try { st = statSync('/tmp/home.tgz'); } catch { return null; }
   if (t.code !== 0) return null;
   if (st.size > 23e6) { t = await sh('bash', ['-c', `cd "${WD}" && find . -type f -size -4M ! -path './inputs/*' ! -path './.cache/*' ! -path './.npm/*' ! -path './.gradle/*' ! -path './.local/lib/*' ! -name '_main.*' | head -5000 > /tmp/home.list && tar -czf /tmp/home.tgz -T /tmp/home.list`]); try { st = statSync('/tmp/home.tgz'); } catch { return null; } if (st.size > 23e6) return null; }
-  const h = await sh('bash', ['-c', `cd "${WD}" && find . -type f ! -path './inputs/*' ! -path './.cache/*' ! -path './.npm/*' ! -name '_main.*' -printf '%p %s %T@\\n' 2>/dev/null | sort | md5sum | cut -c1-32; find . -type f ! -path './inputs/*' 2>/dev/null | wc -l`]);
-  const [hash, files] = h.out.trim().split('\n'); return { path: '/tmp/home.tgz', bytes: st.size, hash: hash || '', files: +files || 0 };
+  return { path: '/tmp/home.tgz', bytes: st.size, hash: hash || '', files: +files || 0 };
 }
 const fsx = {
   async edit(rel, oldT, newT) { const p = safe(rel); if (!existsSync(p)) return 'No such file: ' + rel; const t = readFileSync(p, 'utf8'); const n = t.split(String(oldT)).length - 1; if (!oldT || n === 0) return 'old_text not found in ' + rel + ' (read_file it and copy the exact text)'; if (n > 1) return 'old_text appears ' + n + ' times in ' + rel + '; give a longer unique piece'; writeFileSync(p, t.replace(String(oldT), () => String(newT ?? ''))); return 'Edited ' + rel; },
