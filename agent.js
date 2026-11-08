@@ -592,9 +592,12 @@ export async function runAgent(ctx, task, opts = {}) {
   // v5.2 main-agent inbox: every message the user sends while we work is read before the next step
   let pendingAck = false;
   const takeInbox = () => { const l = (ctx.inbox || []).splice(0); return l.filter(x => String(x || '').trim()); };
+  const pinned = [String(task || '').slice(0, 1500)]; // v6.0 pinned task memory: every instruction the user gave for this job survives context trimming
+  const pinSys = () => pinned.length > 1 ? '\nUSER INSTRUCTIONS FOR THIS JOB (pinned; ALL still apply, a later one wins on conflict):\n' + pinned.map((t, i) => (i + 1) + '. ' + clip(t, 400)).join('\n') : '';
   const addInbox = (l, intoParts) => {
     const txt = l.map(t => { t = String(t); if (/^\u0001STEER:/.test(t)) return '[STEER — the user changed the job while you work; JANUS already answered them in the chat, so do NOT acknowledge it, just apply it to the running work now]: ' + t.slice(7); if (/^\u0001CHAT:/.test(t)) return '[FYI the user also said this (already answered in the chat; it does not change the task, do not reply to it)]: ' + t.slice(6); return '[NEW MESSAGE from the user while you work — treat it as a correction, an addition or a stop; first write ONE short line acknowledging it in their language, then continue with the updated job]: ' + t; }).join('\n');
     const legacy = l.some(t => !/^\u0001(STEER|CHAT):/.test(String(t)));
+    for (const t0 of l) { const t = String(t0); if (!/^\u0001CHAT:/.test(t) && pinned.length < 30) pinned.push(t.replace(/^\u0001STEER:/, '')); }
     if (intoParts) intoParts.push({ text: txt }); else { const last = contents[contents.length - 1]; if (last && last.role === 'user') last.parts.push({ text: txt }); else contents.push({ role: 'user', parts: [{ text: txt }] }); }
     pendingAck = legacy; steps.push({ tool: 'inbox', args: {}, out: clip(l.join(' | '), 200) });
   };
@@ -633,7 +636,7 @@ export async function runAgent(ctx, task, opts = {}) {
         for (const c of contents.slice(1, -12)) { if (c._c) continue; c._c = 1; c.parts = (c.parts || []).filter(p => !p.inlineData || c === contents[contents.length - 1]).map(p => p.functionResponse ? { functionResponse: { ...p.functionResponse, response: { result: clip(String(p.functionResponse.response?.result || ''), 700) } } } : (p.functionCall && p.functionCall.name === 'write_file') ? { functionCall: { name: 'write_file', args: { path: p.functionCall.args.path, content: '(written, ' + String(p.functionCall.args.content || '').length + ' chars; read_file to see it)' } } } : p); if (!c.parts.length) c.parts = [{ text: '(old screenshot removed)' }]; }
       }
       let resp;
-      try { resp = await ctx.llm(contents, tools, { route: i === 0 && hasImg ? 'vision' : route, system, timeoutMs: route === 'code' ? 600000 : 120000, firstMs: i === 0 ? 8000 : route === 'code' ? 60000 : 20000, ...(i === 0 ? { race: true, fastFirst: true } : {}) }); llmFails = 0; }
+      try { resp = await ctx.llm(contents, tools, { rounds: 1, route: i === 0 && hasImg ? 'vision' : route, system: system + pinSys(), timeoutMs: route === 'code' ? 600000 : 120000, firstMs: i === 0 ? 8000 : route === 'code' ? 60000 : 20000, ...(i === 0 ? { race: true, fastFirst: true } : {}) }); llmFails = 0; }
       catch (e) { // every free model busy: wait and retry this step instead of throwing the whole job away
         if (++llmFails <= 3 && !(opts.budgetMs && ctx.now() - t0 > opts.budgetMs)) { await progress({ label: sayLine('_wait', {}, lang)[0], kind: 'spark', step: stepNo }); for (let w = 0; w < [5, 15, 30][llmFails - 1] && !ctx.cancelled && !(ctx.inbox || []).length; w++) await new Promise(z => setTimeout(z, 1000)); i--; continue; }
         const made = files.length ? ' Jo files ban chuki hain woh neeche hain.' : '';
